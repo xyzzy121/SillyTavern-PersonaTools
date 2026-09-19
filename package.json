@@ -1,0 +1,14 @@
+{
+  "name": "sillytavern-personatools",
+  "version": "2.0.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

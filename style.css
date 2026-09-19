@@ -55,6 +55,29 @@
     color: var(--pt-muted);
 }
 
+.pt-form-error {
+    color: var(--pt-danger);
+    font-size: 0.85em;
+}
+
+.pt-list-error {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--pt-danger);
+    border-radius: var(--pt-radius);
+}
+
+.pt-list-error[hidden] {
+    display: none;
+}
+
+.pt-list-error > [role="alert"] {
+    flex: 1 1 180px;
+}
+
 .pt-icon-btn {
     display: inline-flex;
     align-items: center;
@@ -183,7 +206,8 @@
     position: fixed;
     z-index: 30000;
     width: 280px;
-    max-height: min(420px, 70vh);
+    max-width: calc(var(--pt-viewport-width, 100vw) - 16px);
+    max-height: min(420px, 70vh, calc(var(--pt-viewport-height, 100vh) - 16px));
     display: flex;
     flex-direction: column;
     background: var(--pt-surface);
@@ -204,6 +228,31 @@
     opacity: 1;
     transform: translateY(0) scale(1);
     pointer-events: auto;
+}
+
+.pt-quick-status {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    z-index: 30001;
+    width: max-content;
+    max-width: min(320px, calc(100vw - 16px));
+    padding: 8px 12px;
+    border: 1px solid var(--pt-border);
+    border-radius: var(--pt-radius-sm);
+    background: var(--pt-surface);
+    color: var(--pt-body);
+    font-size: calc(var(--mainFontSize, 15px) * 0.85);
+    line-height: 1.4;
+    pointer-events: none;
+}
+
+.pt-quick-status:empty {
+    display: none;
+}
+
+.pt-quick-menu > .pt-empty {
+    padding: 10px 12px;
 }
 
 .pt-quick-header {
@@ -272,6 +321,10 @@
 
 .pt-quick-row.pt-indent {
     margin-left: 18px;
+}
+
+.pt-quick-row.pt-search-result {
+    margin-left: 0;
 }
 
 .pt-quick-avatar {
@@ -469,13 +522,6 @@
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
-.pt-folder-avatars:not(:has(.pt-folder-thumb)) .pt-folder-avatars-badge {
-    position: static;
-    width: 38px;
-    height: 38px;
-    font-size: 15px;
-}
-
 .pt-folder-body {
     flex: 1;
     min-width: 0;
@@ -655,6 +701,8 @@
     flex-wrap: wrap;
     gap: 3px;
     margin: 2px 0 3px;
+    min-width: 0;
+    max-width: 100%;
 }
 
 #user_avatar_block.gridView .pt-card-tags {
@@ -676,12 +724,47 @@
     font-weight: 600;
     cursor: pointer;
     line-height: 1.4;
+    min-width: 0;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
     transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
 }
 
 .pt-tag-chip:hover {
     transform: translateY(-1px);
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.pt-tag-chip:focus-visible,
+.pt-chip-delete:focus-visible {
+    outline: 2px solid var(--pt-accent);
+    outline-offset: 2px;
+}
+
+.pt-tag-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding-right: 4px;
+    border-radius: 999px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.pt-tag-control .pt-tag-chip {
+    flex: 1 1 auto;
+}
+
+.pt-tag-chip > span:first-child {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.pt-tag-chip > i,
+.pt-tag-chip-count {
+    flex-shrink: 0;
 }
 
 .pt-tag-chip.pt-selected {
@@ -705,10 +788,11 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 16px;
-    height: 16px;
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
     padding: 0;
-    margin-right: -4px;
+    margin-right: 0;
     border: none;
     border-radius: 50%;
     background: transparent;
@@ -873,6 +957,11 @@
 .pt-backdrop {
     position: fixed;
     inset: 0;
+    /* The host transforms its zero-height root element. Explicit viewport
+       sizing avoids resolving fixed insets against that containing block. */
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
     background: rgba(0, 0, 0, 0.45);
     backdrop-filter: blur(2px);
     -webkit-backdrop-filter: blur(2px);
@@ -889,8 +978,8 @@
     position: fixed;
     z-index: 999999;
     width: 380px;
-    max-width: calc(100vw - 16px);
-    max-height: min(560px, 85vh);
+    max-width: calc(var(--pt-viewport-width, 100vw) - 16px);
+    max-height: min(560px, 85vh, calc(var(--pt-viewport-height, 100vh) - 16px));
     display: flex;
     flex-direction: column;
     background: var(--pt-surface);
@@ -1078,7 +1167,7 @@ body.rounded-avatars .pt-member-thumb {
 @media (max-width: 1000px) {
     .pt-quick-menu {
         width: calc(100vw - 20px);
-        max-width: 320px;
+        max-width: min(320px, calc(var(--pt-viewport-width, 100vw) - 16px));
     }
 
     .pt-tag-toggle-label {

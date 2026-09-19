@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PersonaTools host fixture</title>
+    <link rel="stylesheet" href="/style.css">
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 24px; color: #eee; background: #20242b; font: 16px sans-serif; }
+        button, input, select { font: inherit; }
+        button, .interactable { cursor: pointer; }
+        button { min-height: 28px; }
+        .menu_button { display: inline-flex; align-items: center; gap: 6px; color: inherit; background: #303640; border: 1px solid #777; border-radius: 5px; padding: 6px 9px; }
+        input { padding: 6px; }
+        .flex-container { display: flex; flex-wrap: wrap; gap: 8px; }
+        .alignitemscenter { align-items: center; }
+        .marginBot10 { margin-bottom: 10px; }
+        #persona-management-block { width: min(700px, calc(100vw - 48px)); padding: 12px; border: 1px solid #555; }
+        #persona_search_bar { flex: 1; min-width: 0; }
+        #user_avatar_block { min-height: 40px; display: flex; flex-direction: column; gap: 8px; }
+        #user_avatar_block.gridView { flex-direction: row; flex-wrap: wrap; justify-content: space-around; }
+        .avatar-container { position: relative; display: flex; gap: 10px; min-height: 74px; padding: 8px; border: 1px solid #666; }
+        .avatar-container img { width: 50px; height: 50px; }
+        .character_name_block { display: flex; align-items: center; min-height: 30px; }
+        .persona-main { flex: 1; min-width: 0; }
+        #user_avatar_block.gridView .avatar-container { width: 30%; max-width: 100px; height: min-content; flex-direction: column; align-items: flex-start; overflow: hidden; }
+        #user_avatar_block.gridView .character_select_container { width: 100%; max-width: 100px; }
+        #user_avatar_block.gridView .character_name_block { width: 100%; flex-direction: column; }
+        #user_avatar_block.gridView .ch_name { width: 100%; text-align: center; font-size: 0.8em; }
+        #persona_pagination_container { margin: 12px 0; display: flex; gap: 8px; align-items: center; }
+        #leftSendForm { position: fixed; bottom: 30px; left: 30px; display: flex; align-items: center; gap: 10px; }
+        #outside { position: fixed; right: 30px; bottom: 30px; }
+        #outside-surface { position: fixed; right: 30px; top: 30px; padding: 20px; background: #384455; }
+        @media (max-width: 600px) {
+            #outside-surface { top: auto; bottom: 90px; right: 12px; padding: 6px; }
+        }
+    </style>
+</head>
+<body>
+    <main id="persona-management-block" class="openDrawer" data-fixture-drawer-open="true" tabindex="-1">
+        <div class="persona_management_left_column">
+            <div class="flex-container marginBot10 alignitemscenter">
+                <input id="persona_search_bar" aria-label="Search personas" placeholder="Search personas">
+                <select id="persona_sort" aria-label="Sort personas"><option value="asc">A to Z</option><option value="desc">Z to A</option></select>
+                <button id="grid-toggle">Grid</button>
+            </div>
+            <div id="persona_pagination_container">
+                <button id="previous-page">Previous</button><output id="page-status"></output><button id="next-page">Next</button>
+            </div>
+            <div id="user_avatar_block"></div>
+        </div>
+    </main>
+    <div id="leftSendForm"><input id="chat-input" aria-label="Chat input"></div>
+    <button id="outside" class="menu_button">Outside control</button>
+    <div id="outside-surface">Outside nonfocusable surface</div>
+    <script src="/fixture.js"></script>
+    <script type="module" src="/index.js"></script>
+</body>
+</html>

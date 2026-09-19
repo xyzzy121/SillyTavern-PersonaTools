@@ -11,6 +11,7 @@ A SillyTavern extension for enhanced persona management: folders, tags and a qui
 - Full keyboard support: type to search, ↑/↓ to move, Enter to select, Esc to close
 - Current persona highlighted with a checkmark
 - Styled hover tooltips with persona name and title
+- Avatar images follow native image updates, including slash-command updates
 
 ### 📁 Persona Folders
 - Organize personas into folders with names and descriptions
@@ -19,6 +20,7 @@ A SillyTavern extension for enhanced persona management: folders, tags and a qui
 - Breadcrumb header inside a folder with back button and quick edit
 - Rename folders (renaming onto an existing folder merges them), edit descriptions, add/remove personas
 - Deleting is a two-click inline confirmation — no browser popups
+- Failed list refreshes show a retry action while preserving the requested folder and page
 
 ### 🏷️ Persona Tags
 - Create colored tags and assign them to personas
@@ -65,6 +67,27 @@ On first launch, PersonaTools automatically imports:
 - **Tags and tag assignments** from the Persona Tags extension
 
 Upgrading from PersonaTools 1.x keeps all your folders, tags and descriptions — the settings format is unchanged.
+
+Existing PersonaTools tags and assignments are preserved. Legacy tags are imported only when both the PersonaTools tag list and assignment map are empty. The import prefers PersonaTags data in SillyTavern's extension settings, with historical root settings as a fallback, and keeps each source's tags and assignments together. Completed migrations are not run again.
+
+## Development checks
+
+The browser regression suite loads the actual `index.js` as a browser module, matching SillyTavern's extension loader, together with `style.css` in a minimal fixture. The fixture supplies host settings, filtering, pagination, persistence, native grid classes, drawer and keyboard behavior, and controlled asynchronous avatar requests. Synthetic cacheable avatar images test image updates through the browser's real HTTP cache. Background chat shortcuts only increment test counters. The suite does not require or modify an installed SillyTavern profile.
+
+With a current Node.js LTS release installed, run:
+
+```sh
+npm ci
+npx playwright install chromium
+npm run check
+npm test
+```
+
+`npm run check` checks every JavaScript file in the repository root, `tests`, and `scripts`, including the Playwright configuration and spec files. It uses Node's syntax checker and skips dependency and generated-output directories. Shared browser helpers handle fixture loading and paint waits without filling in omitted seed settings; tests also fail on uncaught browser exceptions. Expected request failures remain covered through the extension's error handling.
+
+Playwright is a development-only dependency; normal extension installation does not require npm packages. Use `npm run test:headed` to watch the browser. The test server binds to `127.0.0.1:4179`; that port must be free. If Chromium is already installed in a custom Playwright browser cache, set `PLAYWRIGHT_BROWSERS_PATH` to that directory before running the tests instead of installing another copy.
+
+Failure traces are saved in the ignored `test-results/` directory and can be opened with `npx playwright show-trace <trace.zip>`. Fixture tests cover migration, filtered-list updates, folder navigation, popover keyboard focus, quick-switcher request cancellation, and folder-description persistence. A browser smoke check in SillyTavern 1.18 or newer is still recommended for changes to native pagination, sorting, grid layout, persona lifecycle, or locks, because the fixture does not recreate the entire host application.
 
 ## Credits
 

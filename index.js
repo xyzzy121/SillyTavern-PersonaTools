@@ -36,6 +36,10 @@
     // folder names, descriptions and tag names are all user-controlled)
     // ============================================
 
+    function isComposingKey(event) {
+        return event.isComposing || event.keyCode === 229;
+    }
+
     /**
      * @param {string} tag
      * @param {{cls?: string, text?: string, title?: string, attrs?: Object.<string,string>, on?: Object.<string,Function>}} [opts]
@@ -55,7 +59,10 @@
             // (or activating the enclosing persona card). Stop the keydown from
             // bubbling; native button activation still fires exactly one click.
             node.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.stopPropagation();
+                    if (e.repeat || isComposingKey(e)) e.preventDefault();
+                }
             });
         }
         for (const child of children) {
@@ -89,11 +96,17 @@
      * readable (v1 forced white text on pastel backgrounds).
      */
     function contrastColor(hex) {
-        const m = /^#?([0-9a-f]{6})$/i.exec(String(hex).trim());
+        const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(hex).trim());
         if (!m) return '#fff';
-        const n = parseInt(m[1], 16);
+        const digits = m[1].length === 3 ? [...m[1]].map(d => d + d).join('') : m[1];
+        const n = parseInt(digits, 16);
         const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-        return (r * 299 + g * 587 + b * 114) / 1000 > 145 ? '#1a1a1a' : '#fff';
+        const linear = value => {
+            const channel = value / 255;
+            return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+        };
+        const luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+        return (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? '#000000' : '#ffffff';
     }
 
     function styleTagChip(node, color) {
@@ -127,31 +140,46 @@
     }
 
     async function migrateFromOldExtensions() {
-        let migrated = false;
+        let changed = false;
         const pgm = extensionSettings['personas'];
         if (pgm && !settings._migratedPGM) {
             if (pgm.personaGroups && Object.keys(pgm.personaGroups).length > 0 && Object.keys(settings.personaGroups).length === 0) {
                 settings.personaGroups = structuredClone(pgm.personaGroups);
-                migrated = true;
             }
             settings._migratedPGM = true;
+            changed = true;
         }
-        // The old PersonaTags extension wrote into ST's global settings object,
-        // which getContext() no longer exposes — read it from the module export.
-        let gs = {};
-        try { gs = (await import('/script.js')).settings || {}; } catch { /* older ST */ }
-        if ((gs.persona_tag_map || gs.persona_tags) && !settings._migratedTags) {
-            if (gs.persona_tag_map && Object.keys(gs.persona_tag_map).length > 0 && Object.keys(settings.persona_tag_map).length === 0) {
-                settings.persona_tag_map = structuredClone(gs.persona_tag_map);
-                migrated = true;
+
+        if (!settings._migratedTags) {
+            // PersonaTags uses extensionSettings on current ST and root settings
+            // on older releases. Always take the definitions and map together.
+            const readLegacyTags = (source) => {
+                if (!source) return null;
+                const tags = Array.isArray(source.persona_tags) ? source.persona_tags : null;
+                const map = source.persona_tag_map && typeof source.persona_tag_map === 'object' && !Array.isArray(source.persona_tag_map)
+                    ? source.persona_tag_map : null;
+                return tags || map ? { tags: tags || [], map: map || {} } : null;
+            };
+            const hasData = (source) => source && (source.tags.length > 0 || Object.keys(source.map).length > 0);
+            let legacy = readLegacyTags(extensionSettings);
+            if (!hasData(legacy)) {
+                let historical = null;
+                try { historical = readLegacyTags((await import('/script.js')).settings); } catch { /* older ST */ }
+                if (hasData(historical) || !legacy) legacy = historical;
             }
-            if (Array.isArray(gs.persona_tags) && gs.persona_tags.length > 0 && settings.persona_tags.length === 0) {
-                settings.persona_tags = structuredClone(gs.persona_tags);
-                migrated = true;
+
+            if (legacy) {
+                if (settings.persona_tags.length === 0 && Object.keys(settings.persona_tag_map).length === 0) {
+                    settings.persona_tags = structuredClone(legacy.tags);
+                    settings.persona_tag_map = structuredClone(legacy.map);
+                } else if (hasData(legacy)) {
+                    console.info(`[${EXT_NAME}] Skipped legacy tag import because PersonaTools already contains tag data.`);
+                }
+                settings._migratedTags = true;
+                changed = true;
             }
-            settings._migratedTags = true;
         }
-        if (migrated) saveSettings();
+        return changed;
     }
 
     /**
@@ -166,7 +194,7 @@
         for (const name of Object.keys(settings.folderDescriptions)) {
             if (!live.has(name)) { delete settings.folderDescriptions[name]; pruned = true; }
         }
-        if (pruned) saveSettings();
+        return pruned;
     }
 
     // ============================================
@@ -197,6 +225,25 @@
         return settings.personaGroups[avatarId] || [];
     }
 
+    function getFolderDescription(folderName) {
+        if (!Object.hasOwn(settings.folderDescriptions, folderName)) return '';
+        const description = settings.folderDescriptions[folderName];
+        return typeof description === 'string' ? description : '';
+    }
+
+    function setFolderDescription(folderName, description) {
+        if (typeof description !== 'string' || !description) {
+            if (!Object.hasOwn(settings.folderDescriptions, folderName)) return false;
+            delete settings.folderDescriptions[folderName];
+            return true;
+        }
+        if (Object.hasOwn(settings.folderDescriptions, folderName) && settings.folderDescriptions[folderName] === description) return false;
+        Object.defineProperty(settings.folderDescriptions, folderName, {
+            value: description, writable: true, enumerable: true, configurable: true,
+        });
+        return true;
+    }
+
     function isGrouped(avatarId) {
         return getFoldersOf(avatarId).length > 0;
     }
@@ -220,22 +267,12 @@
     }
 
     function addToFolder(avatarId, folderName) {
+        if (!personaExists(avatarId)) return false;
         if (!settings.personaGroups[avatarId]) settings.personaGroups[avatarId] = [];
-        if (!settings.personaGroups[avatarId].includes(folderName)) {
-            settings.personaGroups[avatarId].push(folderName);
-            if (emptiedDescStash.has(folderName) && settings.folderDescriptions[folderName] === undefined) {
-                settings.folderDescriptions[folderName] = emptiedDescStash.get(folderName);
-                emptiedDescStash.delete(folderName);
-            }
-            saveSettings();
-        }
+        if (settings.personaGroups[avatarId].includes(folderName)) return false;
+        settings.personaGroups[avatarId].push(folderName);
+        return true;
     }
-
-    // Descriptions of folders emptied this session, so an exploratory
-    // uncheck/recheck in the folders popover doesn't lose the description,
-    // while a truly abandoned folder can't resurrect its stale description
-    // on a future folder with the same name.
-    const emptiedDescStash = new Map();
 
     function folderStillReferenced(folderName) {
         return Object.values(settings.personaGroups).some(folders => folders.includes(folderName));
@@ -243,47 +280,43 @@
 
     function removeFromFolder(avatarId, folderName) {
         const folders = settings.personaGroups[avatarId];
-        if (!folders) return;
+        if (!folders) return false;
         const idx = folders.indexOf(folderName);
-        if (idx > -1) {
-            folders.splice(idx, 1);
-            if (folders.length === 0) delete settings.personaGroups[avatarId];
-            if (!folderStillReferenced(folderName) && settings.folderDescriptions[folderName] !== undefined) {
-                emptiedDescStash.set(folderName, settings.folderDescriptions[folderName]);
-                delete settings.folderDescriptions[folderName];
-            }
-            saveSettings();
-        }
+        if (idx < 0) return false;
+        folders.splice(idx, 1);
+        if (folders.length === 0) delete settings.personaGroups[avatarId];
+        if (!folderStillReferenced(folderName)) setFolderDescription(folderName, '');
+        return true;
     }
 
     function renameFolder(oldName, newName) {
-        if (!newName || newName === oldName) return;
+        if (!newName || newName === oldName) return false;
+        let changed = false;
         for (const folders of Object.values(settings.personaGroups)) {
             const idx = folders.indexOf(oldName);
             if (idx > -1) {
                 if (folders.includes(newName)) folders.splice(idx, 1); // merging into an existing folder
                 else folders[idx] = newName;
+                changed = true;
             }
         }
-        if (settings.folderDescriptions[oldName] && !settings.folderDescriptions[newName]) {
-            settings.folderDescriptions[newName] = settings.folderDescriptions[oldName];
+        if (getFolderDescription(oldName) && !getFolderDescription(newName)) {
+            changed = setFolderDescription(newName, getFolderDescription(oldName)) || changed;
         }
-        delete settings.folderDescriptions[oldName];
-        if (view.folder === oldName) view.folder = newName;
-        saveSettings();
+        return setFolderDescription(oldName, '') || changed;
     }
 
     function deleteFolder(folderName) {
+        let changed = false;
         for (const [avatarId, folders] of Object.entries(settings.personaGroups)) {
             const idx = folders.indexOf(folderName);
             if (idx > -1) {
                 folders.splice(idx, 1);
                 if (folders.length === 0) delete settings.personaGroups[avatarId];
+                changed = true;
             }
         }
-        delete settings.folderDescriptions[folderName];
-        if (view.folder === folderName) view.folder = null;
-        saveSettings();
+        return setFolderDescription(folderName, '') || changed;
     }
 
     // ============================================
@@ -309,27 +342,30 @@
     function createTag(name, color) {
         const tag = { id: `tag_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, name, color };
         settings.persona_tags.push(tag);
-        saveSettings();
         return tag;
     }
 
     function deleteTag(tagId) {
-        settings.persona_tags = settings.persona_tags.filter(t => t.id !== tagId);
+        const remaining = settings.persona_tags.filter(t => t.id !== tagId);
+        let changed = remaining.length !== settings.persona_tags.length;
+        if (changed) settings.persona_tags = remaining;
         for (const [avatarId, tags] of Object.entries(settings.persona_tag_map)) {
             const next = tags.filter(t => t !== tagId);
+            if (next.length === tags.length && next.length) continue;
             if (next.length) settings.persona_tag_map[avatarId] = next;
             else delete settings.persona_tag_map[avatarId];
+            changed = true;
         }
-        view.tags = view.tags.filter(t => t !== tagId);
-        saveSettings();
+        return changed;
     }
 
     function toggleTagOn(avatarId, tagId) {
+        if (!personaExists(avatarId) || !getTag(tagId)) return false;
         const tags = settings.persona_tag_map[avatarId] || [];
         const next = tags.includes(tagId) ? tags.filter(t => t !== tagId) : [...tags, tagId];
         if (next.length) settings.persona_tag_map[avatarId] = next;
         else delete settings.persona_tag_map[avatarId];
-        saveSettings();
+        return true;
     }
 
     function hasAllTags(avatarId, tagIds) {
@@ -384,8 +420,22 @@
         }
     }
 
+    let avatarSyncQueued = false;
+
     function installFilter() {
-        personasApi.personasFilter.filterFunctions[FILTER_KEY] = personaToolsFilter;
+        personasApi.personasFilter.filterFunctions[FILTER_KEY] = (avatarIds) => {
+            // Native rendering reaches this hook even when no personas match.
+            // An upload has refreshed the HTTP cache before this point; rebind
+            // the stable URL once after rendering, including an unchanged ID.
+            if (Array.isArray(avatarIds) && !avatarSyncQueued) {
+                avatarSyncQueued = true;
+                requestAnimationFrame(() => {
+                    avatarSyncQueued = false;
+                    updateQuickButton(true);
+                });
+            }
+            return personaToolsFilter(avatarIds);
+        };
     }
 
     function getPaginationPage() {
@@ -405,15 +455,72 @@
     // The root list's page, remembered while a folder/tag view is open so
     // going back doesn't dump the user on a different page.
     let rootListPage = 1;
+    let listRefreshRequest = 0;
+    let failedListPage = 1;
+    let listError = null;
+
+    function setListError(failed) {
+        const panel = document.querySelector(SEL.panel);
+        const block = document.querySelector(SEL.block);
+        if (!panel || !block) return;
+        if (failed && !listError) {
+            listError = el('div', { cls: 'pt-list-error', attrs: { id: 'pt-list-error' } },
+                el('span', { text: 'Could not load personas. Please try again.', attrs: { role: 'alert' } }),
+                el('button', {
+                    cls: 'menu_button', text: 'Retry',
+                    attrs: { type: 'button', 'data-pt-focus': 'retry-personas' },
+                    on: { click: () => refreshList(failedListPage) },
+                }),
+            );
+            block.insertAdjacentElement('beforebegin', listError);
+        }
+        const restoreFocus = rememberFocus(panel, { fallback: focusPersonaPanel });
+        panel.classList.toggle('pt-list-failed', failed);
+        // Both mouse and assistive-technology access must exclude stale cards.
+        block.classList.toggle('pt-hidden', failed);
+        document.getElementById('persona_pagination_container')?.classList.toggle('pt-hidden', failed);
+        if (listError) {
+            listError.hidden = !failed;
+            listError.querySelector('button').disabled = false;
+            listError.removeAttribute('aria-busy');
+        }
+        restoreFocus();
+    }
 
     /** Re-render ST's persona list through the filters, then re-decorate. */
     async function refreshList(page = 0) {
-        try { await personasApi.getUserAvatars(true); }
-        catch (e) { error('refreshList failed', e); }
-        if (page > 0) gotoPaginationPage(page);
+        const request = ++listRefreshRequest;
+        const targetPage = page > 0 ? page : getPaginationPage();
+        const panel = document.querySelector(SEL.panel);
+        if (panel?.contains(document.activeElement)) {
+            restorePanelFocus = rememberFocus(panel, { fallback: focusPersonaPanel });
+        }
+        if (listError && !listError.hidden) {
+            listError.querySelector('button').disabled = true;
+            listError.setAttribute('aria-busy', 'true');
+        }
+        try {
+            const avatars = await personasApi.getUserAvatars(true);
+            if (request !== listRefreshRequest) return;
+            if (!Array.isArray(avatars)) throw new Error('Avatar request did not return a persona list');
+        } catch (e) {
+            if (request !== listRefreshRequest) return;
+            failedListPage = targetPage;
+            setListError(true);
+            scheduleDecorate();
+            error('refreshList failed', e);
+            return;
+        }
+        setListError(false);
+        gotoPaginationPage(targetPage);
         scheduleDecorate();
     }
     const refreshListSoon = debounced(refreshList, 150);
+
+    function refreshAfterTagChange(tagId) {
+        if (view.tags.includes(tagId)) refreshListSoon();
+        else scheduleDecorate();
+    }
 
     function isRootView() { return !view.folder && !view.tags.length; }
 
@@ -439,10 +546,7 @@
     };
 
     let decorateQueued = false;
-    // Set when the user touches ST's change-image UI: ST refreshes the persona
-    // thumbnail without emitting an event, so the quick button must force-reload
-    // its (otherwise identical) image URL on the next re-render.
-    let pendingAvatarRefresh = false;
+    let restorePanelFocus = () => {};
 
     function scheduleDecorate() {
         if (decorateQueued) return;
@@ -456,6 +560,7 @@
     function decorate() {
         const block = document.querySelector(SEL.block);
         if (!block) return;
+        const restoreFocus = rememberFocus(document.querySelector(SEL.panel), { fallback: focusPersonaPanel });
         renderFolderCards(block);
         decorateNativeCards(block);
         updateFolderHeader();
@@ -468,10 +573,8 @@
             const hasFolders = !!block.querySelector('.pt-folder-card');
             panel.classList.toggle('pt-root-empty', hasFolders && !hasNative);
         }
-        if (pendingAvatarRefresh) {
-            pendingAvatarRefresh = false;
-            updateQuickButton(true);
-        }
+        restoreFocus();
+        restorePanelFocus();
     }
 
     /**
@@ -500,6 +603,14 @@
     function startObserver() {
         const block = document.querySelector(SEL.block);
         if (!block) return;
+        // A popover can hand focus back after a native refresh starts but before
+        // it replaces the cards. Remember focus changes, not just request-start
+        // focus, so that late replacement still restores the logical control.
+        document.addEventListener('focusin', () => {
+            restorePanelFocus = rememberFocus(document.querySelector(SEL.panel), { fallback: focusPersonaPanel });
+        }, true);
+        document.addEventListener('pointerdown', () => { restorePanelFocus = () => {}; }, true);
+        window.addEventListener('blur', () => { restorePanelFocus = () => {}; });
         const observer = new MutationObserver((records) => {
             if (hasForeignMutations(records)) scheduleDecorate();
         });
@@ -532,12 +643,12 @@
             el('span', { cls: 'pt-folder-count', text: String(members.length) }),
         );
         const body = el('div', { cls: 'pt-folder-body' }, titleRow);
-        const desc = settings.folderDescriptions[name];
+        const desc = getFolderDescription(name);
         if (desc) body.append(el('div', { cls: 'pt-folder-desc', text: desc }));
 
         const editBtn = el('button', {
             cls: 'pt-icon-btn pt-folder-edit', title: 'Edit folder',
-            attrs: { type: 'button' },
+            attrs: { type: 'button', 'data-pt-focus': `edit-folder:${name}` },
             on: {
                 click: (e) => { e.stopPropagation(); openFolderEditor(editBtn, name); },
                 mousedown: (e) => e.stopPropagation(),
@@ -547,7 +658,7 @@
         const open = () => changeView(() => { view.folder = name; });
         return el('div', {
             cls: 'pt-folder-card pt-injected',
-            attrs: { role: 'button', tabindex: '0', 'data-folder': name },
+            attrs: { role: 'button', tabindex: '0', 'data-folder': name, 'data-pt-focus': `folder:${name}` },
             on: {
                 click: open,
                 keydown: (e) => {
@@ -571,14 +682,14 @@
 
             const actions = el('span', { cls: 'pt-card-actions' },
                 el('button', {
-                    cls: 'pt-icon-btn', title: 'Folders', attrs: { type: 'button' },
+                    cls: 'pt-icon-btn', title: 'Folders', attrs: { type: 'button', 'data-pt-focus': `folders:${avatarId}` },
                     on: {
                         click: (e) => { e.stopPropagation(); e.preventDefault(); openPersonaFolders(e.currentTarget, avatarId); },
                         mousedown: (e) => e.stopPropagation(),
                     },
                 }, icon('fa-folder')),
                 el('button', {
-                    cls: 'pt-icon-btn', title: 'Tags', attrs: { type: 'button' },
+                    cls: 'pt-icon-btn', title: 'Tags', attrs: { type: 'button', 'data-pt-focus': `tags:${avatarId}` },
                     on: {
                         click: (e) => { e.stopPropagation(); e.preventDefault(); openTagManager(e.currentTarget, avatarId); },
                         mousedown: (e) => e.stopPropagation(),
@@ -591,9 +702,10 @@
             if (tags.length) {
                 const chips = el('div', { cls: 'pt-card-tags' });
                 for (const tag of tags) {
-                    const chip = el('span', {
+                    const chip = el('button', {
                         cls: 'pt-tag-chip pt-tag-chip-small', text: tag.name,
                         title: 'Filter by this tag',
+                        attrs: { type: 'button', 'aria-pressed': String(view.tags.includes(tag.id)), 'data-pt-focus': `card-tag:${avatarId}:${tag.id}` },
                         on: {
                             click: (e) => { e.stopPropagation(); toggleTagFilter(tag.id); },
                             mousedown: (e) => e.stopPropagation(),
@@ -629,7 +741,7 @@
 
     function updateFolderHeader() {
         if (!folderHeader) return;
-        const show = !!view.folder && !view.tags.length && !isSearchActive();
+        const show = !!view.folder && !isSearchActive();
         folderHeader.classList.toggle('pt-hidden', !show);
         if (show) {
             const title = folderHeader.querySelector('.pt-folder-header-title');
@@ -679,19 +791,22 @@
 
     function renderTagBar() {
         if (!tagBar || !tagToggleBtn) return;
+        const restoreFocus = rememberFocus(tagBar, { fallback: () => tagToggleBtn.focus({ preventScroll: true }) });
 
         const hasTags = settings.persona_tags.length > 0;
         const activeCount = view.tags.length;
 
         tagToggleBtn.classList.toggle('pt-hidden', !hasTags && !activeCount);
         tagToggleBtn.classList.toggle('pt-open', tagBarExpanded);
+        tagToggleBtn.setAttribute('aria-expanded', String(tagBarExpanded));
+        tagToggleBtn.setAttribute('aria-label', `Filter by tags${activeCount ? `, ${activeCount} active` : ''}`);
         const toggleKids = [icon('fa-tags'), el('span', { cls: 'pt-tag-toggle-label', text: 'Tags' })];
         if (activeCount) toggleKids.push(el('span', { cls: 'pt-tag-toggle-badge', text: String(activeCount) }));
         toggleKids.push(icon(`fa-chevron-${tagBarExpanded ? 'up' : 'down'} pt-chevron`));
         tagToggleBtn.replaceChildren(...toggleKids);
 
         tagBar.replaceChildren();
-        if (!tagBarExpanded || (!hasTags && !activeCount)) { tagBar.classList.add('pt-hidden'); return; }
+        if (!tagBarExpanded || (!hasTags && !activeCount)) { tagBar.classList.add('pt-hidden'); restoreFocus(); return; }
         tagBar.classList.remove('pt-hidden');
 
         const chips = el('div', { cls: 'pt-tag-bar-chips' });
@@ -703,7 +818,7 @@
                 const selected = view.tags.includes(tag.id);
                 const chip = el('button', {
                     cls: `pt-tag-chip${selected ? ' pt-selected' : ''}`,
-                    attrs: { type: 'button' },
+                    attrs: { type: 'button', 'aria-pressed': String(selected), 'data-pt-focus': `filter-tag:${tag.id}` },
                     on: { click: () => toggleTagFilter(tag.id) },
                 }, el('span', { text: tag.name }), el('span', { cls: 'pt-tag-chip-count', text: String(getTagUsage(tag.id)) }));
                 styleTagChip(chip, tag.color);
@@ -713,10 +828,10 @@
         };
 
         const header = el('div', { cls: 'pt-tag-bar-header' });
-        if (settings.persona_tags.length > 6) {
+        if (settings.persona_tags.length > 6 || tagSearchValue) {
             header.append(el('input', {
                 cls: 'pt-input pt-tag-bar-search',
-                attrs: { type: 'search', placeholder: 'Filter tags…', value: tagSearchValue },
+                attrs: { type: 'search', placeholder: 'Filter tags…', 'aria-label': 'Filter tags', value: tagSearchValue, 'data-pt-focus': 'tag-search' },
                 on: { input: (e) => { tagSearchValue = e.target.value; renderChips(); } },
             }));
         }
@@ -731,6 +846,7 @@
 
         renderChips();
         tagBar.append(chips);
+        restoreFocus();
     }
 
     // ============================================
@@ -739,18 +855,112 @@
 
     let activePopover = null;
 
-    function closePopover() {
+    function focusableControls(container) {
+        if (!container) return [];
+        return [...container.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]
+            .filter(node => node.tabIndex >= 0 && !node.matches(':disabled') && !node.closest('[inert]') && node.getClientRects().length);
+    }
+
+    function focusPersonaPanel() {
+        const panel = document.querySelector(SEL.panel);
+        if (!panel || !panel.getClientRects().length) return;
+        if (!panel.hasAttribute('tabindex')) panel.setAttribute('tabindex', '-1');
+        panel.focus({ preventScroll: true });
+    }
+
+    /** Preserve the logical control when a render replaces its DOM node. */
+    function rememberFocus(container, { fallback } = {}) {
+        const focused = document.activeElement;
+        if (!container || !focused || !container.contains(focused)) return () => {};
+        const key = focused.getAttribute('data-pt-focus');
+        const id = focused.id;
+        const index = focusableControls(container).indexOf(focused);
+        const selection = typeof focused.selectionStart === 'number'
+            ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] : null;
+        return () => {
+            if (focused.isConnected && focused.getClientRects().length) return;
+            // An unrelated control may have deliberately taken focus during an
+            // asynchronous host render. Do not move the user back in that case.
+            if (document.activeElement !== document.body && document.activeElement !== focused && document.activeElement?.isConnected) return;
+            const controls = focusableControls(container);
+            let target = controls.find(node => (key && node.getAttribute('data-pt-focus') === key) || (id && node.id === id));
+            if (!target && fallback) { fallback(); return; }
+            target ||= controls[Math.min(Math.max(index, 0), controls.length - 1)] || container.closest('.pt-popover');
+            target?.focus({ preventScroll: true });
+            if (selection && target === controls.find(node => node.getAttribute('data-pt-focus') === key)) {
+                try { target.setSelectionRange(...selection); } catch { /* non-text input */ }
+            }
+        };
+    }
+
+    function closePopover({ restoreFocus = true } = {}) {
         if (!activePopover) return;
-        activePopover.cleanup();
+        const closing = activePopover;
         activePopover = null;
+        closing.cleanup(restoreFocus);
+    }
+
+    /** Keep fixed overlays inside the visible viewport as content and anchors move. */
+    function trackOverlayPosition(overlay, anchor, { preferAbove = false, centered = false } = {}) {
+        let lastRect = anchor?.getBoundingClientRect();
+        let frame = null;
+        let disposed = false;
+        const position = () => {
+            frame = null;
+            if (disposed || !overlay.isConnected) return;
+            if (anchor?.isConnected && anchor.getClientRects().length) lastRect = anchor.getBoundingClientRect();
+            const viewport = window.visualViewport;
+            const leftEdge = (viewport?.offsetLeft || 0) + 8;
+            const topEdge = (viewport?.offsetTop || 0) + 8;
+            const width = viewport?.width || window.innerWidth;
+            const height = viewport?.height || window.innerHeight;
+            const rightEdge = leftEdge + width - 16;
+            const bottomEdge = topEdge + height - 16;
+            overlay.style.setProperty('--pt-viewport-width', `${width}px`);
+            overlay.style.setProperty('--pt-viewport-height', `${height}px`);
+            const rect = lastRect || { left: leftEdge, top: topEdge, bottom: topEdge, width: 0 };
+            // offset sizes exclude the opening animation's scale/translation.
+            const overlayWidth = overlay.offsetWidth;
+            const overlayHeight = overlay.offsetHeight;
+            let left = centered ? rect.left + rect.width / 2 - overlayWidth / 2 : rect.left;
+            let top = preferAbove ? rect.top - overlayHeight - 8 : rect.bottom + 8;
+            if (preferAbove ? top < topEdge : top + overlayHeight > bottomEdge) {
+                top = preferAbove ? rect.bottom + 8 : rect.top - overlayHeight - 8;
+            }
+            left = Math.max(leftEdge, Math.min(left, rightEdge - overlayWidth));
+            top = Math.max(topEdge, Math.min(top, bottomEdge - overlayHeight));
+            overlay.style.left = `${left}px`;
+            overlay.style.top = `${top}px`;
+        };
+        const schedule = () => {
+            if (!disposed && frame === null) frame = requestAnimationFrame(position);
+        };
+        const observer = new ResizeObserver(schedule);
+        observer.observe(overlay);
+        if (anchor) observer.observe(anchor);
+        window.addEventListener('resize', schedule);
+        window.addEventListener('scroll', schedule, true);
+        window.visualViewport?.addEventListener('resize', schedule);
+        window.visualViewport?.addEventListener('scroll', schedule);
+        position();
+        return () => {
+            disposed = true;
+            if (frame !== null) cancelAnimationFrame(frame);
+            observer.disconnect();
+            window.removeEventListener('resize', schedule);
+            window.removeEventListener('scroll', schedule, true);
+            window.visualViewport?.removeEventListener('resize', schedule);
+            window.visualViewport?.removeEventListener('scroll', schedule);
+        };
     }
 
     /**
      * Anchored popover with backdrop. Esc or backdrop click closes it.
      * Returns the body element for content.
      */
-    function openPopover(anchor, titleText, titleIcon) {
-        closePopover();
+    function openPopover(anchor, titleText, titleIcon, { personaId = null, folderName = null } = {}) {
+        closePopover({ restoreFocus: false });
+        const anchorKey = anchor.getAttribute('data-pt-focus');
         // Swallow the backdrop's pointer events entirely: if the click bubbled
         // to document, ST would treat it as an outside click and close the
         // whole persona-management drawer along with the popover.
@@ -760,6 +970,7 @@
                 click: (e) => { e.stopPropagation(); e.preventDefault(); closePopover(); },
                 mousedown: (e) => { e.stopPropagation(); e.preventDefault(); },
                 mouseup: (e) => e.stopPropagation(),
+                touchstart: (e) => e.stopPropagation(),
             },
         });
         const header = el('div', { cls: 'pt-popover-header' },
@@ -770,89 +981,142 @@
         const body = el('div', { cls: 'pt-popover-body' });
         const popover = el('div', {
             cls: 'pt-popover',
-            attrs: { role: 'dialog' },
-            on: { click: (e) => e.stopPropagation(), mousedown: (e) => e.stopPropagation() },
+            attrs: { role: 'dialog', 'aria-label': titleText, 'aria-modal': 'true', tabindex: '-1' },
+            on: {
+                click: (e) => e.stopPropagation(),
+                mousedown: (e) => e.stopPropagation(),
+                touchstart: (e) => e.stopPropagation(),
+                // Let local fields and native controls process keys, then stop
+                // the host's chat shortcuts from handling the same event.
+                keydown: (e) => e.stopPropagation(),
+                keyup: (e) => e.stopPropagation(),
+            },
         }, header, body);
 
         const onKeydown = (e) => {
-            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePopover(); }
+            if (isComposingKey(e)) return;
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePopover(); return; }
+            if (e.key !== 'Tab') return;
+            const controls = focusableControls(popover);
+            const first = controls[0] || popover;
+            const last = controls[controls.length - 1] || popover;
+            if (!popover.contains(document.activeElement) || document.activeElement === popover
+                || (e.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+                e.preventDefault();
+                (e.shiftKey ? last : first).focus();
+            }
+            e.stopPropagation();
         };
         document.addEventListener('keydown', onKeydown, true);
         document.body.append(backdrop, popover);
-
-        requestAnimationFrame(() => {
-            const rect = anchor.getBoundingClientRect();
-            const pr = popover.getBoundingClientRect();
-            let left = rect.left + rect.width / 2 - pr.width / 2;
-            let top = rect.bottom + 8;
-            left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
-            if (top + pr.height > window.innerHeight - 8) top = Math.max(8, rect.top - pr.height - 8);
-            popover.style.left = `${left}px`;
-            popover.style.top = `${top}px`;
+        const stopPositioning = trackOverlayPosition(popover, anchor, { centered: true });
+        const positionFrame = requestAnimationFrame(() => {
+            if (!popover.isConnected) return;
             popover.classList.add('pt-positioned');
+            (focusableControls(body)[0] || focusableControls(popover)[0] || popover).focus({ preventScroll: true });
         });
 
-        activePopover = {
-            cleanup: () => {
+        const session = {
+            personaId,
+            folderName,
+            refresh: null,
+            disposeContent: null,
+            cleanup: (restoreFocus) => {
+                cancelAnimationFrame(positionFrame);
+                stopPositioning();
                 document.removeEventListener('keydown', onKeydown, true);
+                session.disposeContent?.();
                 backdrop.remove();
                 popover.remove();
+                if (!restoreFocus) return;
+                const replacement = anchorKey && [...document.querySelectorAll('[data-pt-focus]')]
+                    .find(node => node.getAttribute('data-pt-focus') === anchorKey && node.getClientRects().length);
+                const target = anchor.isConnected && anchor.getClientRects().length ? anchor : replacement;
+                if (target) target.focus({ preventScroll: true });
+                else focusPersonaPanel();
             },
         };
+        activePopover = session;
         return body;
     }
 
-    /** A button that requires a second click within 3s to confirm. */
-    function confirmButton(labelText, confirmText, onConfirm) {
+    /** Share confirmation timing while callers own controls and event guards. */
+    function createConfirmation(onConfirm, onArmedChange) {
         let armed = false;
         let timer = null;
-        const label = el('span', { text: labelText });
-        const btn = el('button', {
-            cls: 'pt-danger-btn menu_button', attrs: { type: 'button' },
-            on: {
-                click: () => {
-                    if (!armed) {
-                        armed = true;
-                        btn.classList.add('pt-armed');
-                        label.textContent = confirmText;
-                        timer = setTimeout(() => { armed = false; btn.classList.remove('pt-armed'); label.textContent = labelText; }, 3000);
-                    } else {
-                        clearTimeout(timer);
-                        onConfirm();
-                    }
-                },
+        let disposed = false;
+        const reset = () => {
+            clearTimeout(timer);
+            timer = null;
+            if (armed) {
+                armed = false;
+                onArmedChange(false);
+            }
+        };
+        return {
+            activate() {
+                if (disposed) return;
+                if (armed) {
+                    reset();
+                    onConfirm();
+                    return;
+                }
+                armed = true;
+                onArmedChange(true);
+                timer = setTimeout(reset, 3000);
             },
-        }, icon('fa-trash-can'), label);
-        return btn;
+            dispose() {
+                if (disposed) return;
+                disposed = true;
+                reset();
+            },
+        };
     }
 
     // --- Popover: folders of one persona ---
 
     function openPersonaFolders(anchor, avatarId) {
-        const body = openPopover(anchor, `Folders — ${getPersonaName(avatarId)}`, 'fa-folder-tree');
+        if (!personaExists(avatarId)) return;
+        const body = openPopover(anchor, `Folders — ${getPersonaName(avatarId)}`, 'fa-folder-tree', { personaId: avatarId });
         const list = el('div', { cls: 'pt-popover-list' });
+        // Undo belongs to this dialog. A fresh Create never inherits it.
+        const removedFolders = new Map();
 
         // Includes folders that exist only in settings (still assembling).
         function getAllFolderNames() {
-            const names = new Set();
+            const names = new Set(removedFolders.keys());
             for (const folders of Object.values(settings.personaGroups)) folders.forEach(f => names.add(f));
             return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
         }
 
         function render() {
+            const restoreFocus = rememberFocus(list);
             list.replaceChildren();
             const memberOf = getFoldersOf(avatarId);
             const folders = getAllFolderNames();
             if (!folders.length) {
                 list.append(el('div', { cls: 'pt-empty', text: 'No folders yet — create one below' }));
+                restoreFocus();
                 return;
             }
             for (const name of folders) {
-                const checkbox = el('input', { attrs: { type: 'checkbox' } });
+                const checkbox = el('input', { attrs: { type: 'checkbox', 'aria-label': name, 'data-pt-focus': `membership:${name}` } });
                 checkbox.checked = memberOf.includes(name);
                 checkbox.addEventListener('change', () => {
-                    if (checkbox.checked) addToFolder(avatarId, name);
-                    else removeFromFolder(avatarId, name);
+                    if (!body.isConnected || !personaExists(avatarId)) return;
+                    let changed = false;
+                    if (checkbox.checked) {
+                        if (removedFolders.has(name) && !folderStillReferenced(name)) {
+                            changed = setFolderDescription(name, removedFolders.get(name));
+                        }
+                        removedFolders.delete(name);
+                        changed = addToFolder(avatarId, name) || changed;
+                    } else {
+                        const description = getFolderDescription(name);
+                        changed = removeFromFolder(avatarId, name);
+                        if (!folderStillReferenced(name)) removedFolders.set(name, description);
+                    }
+                    if (changed) saveSettings();
                     render();
                     refreshListSoon();
                 });
@@ -862,31 +1126,52 @@
                     el('span', { cls: 'pt-check-row-count', text: String(getFolderMembers(name).length) }),
                 ));
             }
+            restoreFocus();
         }
 
-        const nameInput = el('input', { cls: 'pt-input', attrs: { type: 'text', placeholder: 'New folder name' } });
-        const descInput = el('input', { cls: 'pt-input', attrs: { type: 'text', placeholder: 'Description (optional)' } });
+        const nameInput = el('input', { cls: 'pt-input', attrs: { type: 'text', placeholder: 'New folder name', 'aria-label': 'New folder name', 'aria-describedby': 'pt-new-folder-error' } });
+        const descInput = el('input', { cls: 'pt-input', attrs: { type: 'text', placeholder: 'Description (optional)', 'aria-label': 'Folder description' } });
+        const duplicateError = el('div', { cls: 'pt-form-error pt-hidden', attrs: { id: 'pt-new-folder-error', role: 'status' } });
+        nameInput.addEventListener('input', () => {
+            nameInput.removeAttribute('aria-invalid');
+            duplicateError.classList.add('pt-hidden');
+            duplicateError.textContent = '';
+        });
         const addBtn = el('button', {
             cls: 'pt-primary-btn menu_button', attrs: { type: 'button' },
             on: {
                 click: () => {
+                    if (!body.isConnected || !personaExists(avatarId)) return;
                     const name = nameInput.value.trim();
                     if (!name) { nameInput.focus(); return; }
+                    if (folderStillReferenced(name)) {
+                        duplicateError.textContent = 'This folder already exists. Use its checkbox to assign it, or Edit folder to change its description.';
+                        duplicateError.classList.remove('pt-hidden');
+                        nameInput.setAttribute('aria-invalid', 'true');
+                        nameInput.focus();
+                        return;
+                    }
                     const desc = descInput.value.trim();
-                    if (desc) settings.folderDescriptions[name] = desc;
-                    addToFolder(avatarId, name);
+                    removedFolders.delete(name);
+                    const descriptionChanged = setFolderDescription(name, desc);
+                    const membershipChanged = addToFolder(avatarId, name);
+                    if (descriptionChanged || membershipChanged) saveSettings();
+                    nameInput.removeAttribute('aria-invalid');
+                    duplicateError.classList.add('pt-hidden');
+                    duplicateError.textContent = '';
                     nameInput.value = ''; descInput.value = '';
                     render();
                     refreshListSoon();
                 },
             },
         }, icon('fa-plus'), el('span', { text: 'Create' }));
-        nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } });
+        nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !isComposingKey(e)) { e.preventDefault(); e.stopPropagation(); addBtn.click(); } });
 
         body.append(
             list,
             el('div', { cls: 'pt-popover-section-title', text: 'New folder' }),
             el('div', { cls: 'pt-form-row' }, nameInput, addBtn),
+            duplicateError,
             descInput,
         );
         render();
@@ -894,49 +1179,64 @@
 
     // --- Popover: edit one folder ---
 
-    function openFolderEditor(anchor, folderName) {
-        const body = openPopover(anchor, `Edit folder — ${folderName}`, 'fa-folder-open');
+    /** Reconcile folder lifetimes after an editor or native persona mutation. */
+    function reconcileFolderUi(affectedFolders) {
+        const editedFolder = activePopover?.folderName;
+        if (editedFolder && affectedFolders.has(editedFolder)) {
+            if (getFolderMembers(editedFolder).length) activePopover.refresh?.();
+            else closePopover();
+        }
+        if (view.folder && !getFolderMembers(view.folder).length) {
+            changeView(() => { view.folder = null; });
+            return true;
+        }
+        return false;
+    }
 
-        const nameInput = el('input', { cls: 'pt-input', attrs: { type: 'text' } });
+    function openFolderEditor(anchor, folderName) {
+        if (!getFolderMembers(folderName).length) return;
+        const body = openPopover(anchor, `Edit folder — ${folderName}`, 'fa-folder-open', { folderName });
+        const popover = activePopover;
+
+        const nameInput = el('input', { cls: 'pt-input', attrs: { type: 'text', 'aria-label': 'Folder name' } });
         nameInput.value = folderName;
-        const descInput = el('input', { cls: 'pt-input', attrs: { type: 'text', placeholder: 'Description (optional)' } });
-        descInput.value = settings.folderDescriptions[folderName] || '';
+        const descInput = el('input', { cls: 'pt-input', attrs: { type: 'text', placeholder: 'Description (optional)', 'aria-label': 'Folder description' } });
+        descInput.value = getFolderDescription(folderName);
 
         const list = el('div', { cls: 'pt-popover-list' });
         function renderMembers() {
+            const restoreFocus = rememberFocus(list);
             list.replaceChildren();
             const members = getFolderMembers(folderName);
-            if (!members.length) {
-                list.append(el('div', { cls: 'pt-empty', text: 'No personas in this folder' }));
-                return;
-            }
             for (const avatarId of members) {
                 list.append(el('div', { cls: 'pt-member-row' },
                     el('img', { cls: 'pt-member-thumb', attrs: { src: thumbUrl(avatarId), alt: '', loading: 'lazy' } }),
                     el('span', { cls: 'pt-member-name', text: getPersonaName(avatarId) }),
                     el('button', {
-                        cls: 'pt-icon-btn', title: 'Remove from folder', attrs: { type: 'button' },
+                        cls: 'pt-icon-btn', title: 'Remove from folder', attrs: { type: 'button', 'aria-label': `Remove ${getPersonaName(avatarId)} from folder`, 'data-pt-focus': `remove-member:${avatarId}` },
                         on: {
                             click: () => {
-                                removeFromFolder(avatarId, folderName);
-                                renderMembers();
-                                refreshListSoon();
-                                if (!getFolderMembers(folderName).length && view.folder === folderName) {
-                                    view.folder = null;
-                                    closePopover();
-                                }
+                                if (!body.isConnected) return;
+                                if (removeFromFolder(avatarId, folderName)) saveSettings();
+                                if (!reconcileFolderUi(new Set([folderName]))) refreshListSoon();
                             },
                         },
                     }, icon('fa-xmark')),
                 ));
             }
+            restoreFocus();
         }
 
-        const initialDesc = settings.folderDescriptions[folderName] || '';
+        const initialDesc = getFolderDescription(folderName);
         const saveBtn = el('button', {
             cls: 'pt-primary-btn menu_button', attrs: { type: 'button' },
             on: {
                 click: () => {
+                    if (!body.isConnected) return;
+                    if (!getFolderMembers(folderName).length) {
+                        if (!reconcileFolderUi(new Set([folderName]))) refreshListSoon();
+                        return;
+                    }
                     const newName = nameInput.value.trim() || folderName;
                     const typedDesc = descInput.value.trim();
                     // Rename first, then write the description under the FINAL name
@@ -945,21 +1245,30 @@
                     // user actually edited the field, so merging into an existing
                     // folder doesn't overwrite that folder's description with
                     // this one's untouched prefill.
-                    renameFolder(folderName, newName);
-                    if (typedDesc !== initialDesc) {
-                        if (typedDesc) settings.folderDescriptions[newName] = typedDesc;
-                        else delete settings.folderDescriptions[newName];
-                    }
-                    saveSettings();
+                    const renamed = renameFolder(folderName, newName);
+                    const descriptionChanged = typedDesc !== initialDesc && setFolderDescription(newName, typedDesc);
+                    if (view.folder === folderName) view.folder = newName;
+                    if (renamed || descriptionChanged) saveSettings();
                     closePopover();
                     refreshList();
                 },
             },
         }, icon('fa-check'), el('span', { text: 'Save' }));
 
-        const deleteBtn = confirmButton('Delete folder', 'Really delete?', () => {
+        const deleteLabel = el('span', { text: 'Delete folder' });
+        const deleteBtn = el('button', {
+            cls: 'pt-danger-btn menu_button', attrs: { type: 'button' },
+            on: { click: () => { if (body.isConnected) confirmation.activate(); } },
+        }, icon('fa-trash-can'), deleteLabel);
+        const confirmation = createConfirmation(() => {
             closePopover();
-            changeView(() => deleteFolder(folderName));
+            changeView(() => {
+                if (deleteFolder(folderName)) saveSettings();
+                if (view.folder === folderName) view.folder = null;
+            });
+        }, (armed) => {
+            deleteBtn.classList.toggle('pt-armed', armed);
+            deleteLabel.textContent = armed ? 'Really delete?' : 'Delete folder';
         });
 
         body.append(
@@ -971,25 +1280,44 @@
             list,
             el('div', { cls: 'pt-popover-footer' }, deleteBtn, saveBtn),
         );
+        popover.refresh = renderMembers;
+        popover.disposeContent = confirmation.dispose;
         renderMembers();
     }
 
     // --- Popover: tags of one persona ---
 
     function openTagManager(anchor, avatarId) {
-        const body = openPopover(anchor, `Tags — ${getPersonaName(avatarId)}`, 'fa-tags');
+        if (!personaExists(avatarId)) return;
+        const body = openPopover(anchor, `Tags — ${getPersonaName(avatarId)}`, 'fa-tags', { personaId: avatarId });
 
         const assigned = el('div', { cls: 'pt-chip-group' });
         const available = el('div', { cls: 'pt-chip-group' });
+        const confirmations = [];
+
+        function disposeConfirmations() {
+            for (const confirmation of confirmations.splice(0)) confirmation.dispose();
+        }
+        activePopover.disposeContent = disposeConfirmations;
+
+        function toggleAssignment(tagId) {
+            if (!body.isConnected || !personaExists(avatarId)) return;
+            if (!toggleTagOn(avatarId, tagId)) return;
+            saveSettings();
+            render();
+            refreshAfterTagChange(tagId);
+        }
 
         function render() {
+            const restoreFocus = rememberFocus(body);
+            disposeConfirmations();
             assigned.replaceChildren();
             const tags = getTagsOf(avatarId);
             if (!tags.length) assigned.append(el('div', { cls: 'pt-empty', text: 'No tags assigned' }));
             for (const tag of tags) {
                 const chip = el('button', {
-                    cls: 'pt-tag-chip', title: 'Remove from persona', attrs: { type: 'button' },
-                    on: { click: () => { toggleTagOn(avatarId, tag.id); render(); scheduleDecorate(); } },
+                    cls: 'pt-tag-chip', title: 'Remove from persona', attrs: { type: 'button', 'aria-label': `Remove ${tag.name} from persona`, 'data-pt-focus': `assigned-tag:${tag.id}` },
+                    on: { click: () => toggleAssignment(tag.id) },
                 }, el('span', { text: tag.name }), icon('fa-xmark'));
                 styleTagChip(chip, tag.color);
                 assigned.append(chip);
@@ -999,36 +1327,44 @@
             if (!settings.persona_tags.length) available.append(el('div', { cls: 'pt-empty', text: 'No tags yet — create one below' }));
             for (const tag of [...settings.persona_tags].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))) {
                 const isAssigned = (settings.persona_tag_map[avatarId] || []).includes(tag.id);
+                const group = el('span', { cls: 'pt-tag-control' });
+                styleTagChip(group, tag.color);
                 const chip = el('button', {
-                    cls: `pt-tag-chip${isAssigned ? ' pt-selected' : ''}`, attrs: { type: 'button' },
-                    on: { click: () => { toggleTagOn(avatarId, tag.id); render(); scheduleDecorate(); } },
+                    cls: `pt-tag-chip${isAssigned ? ' pt-selected' : ''}`,
+                    attrs: { type: 'button', 'aria-label': tag.name, 'aria-pressed': String(isAssigned), 'data-pt-focus': `available-tag:${tag.id}` },
+                    on: { click: () => toggleAssignment(tag.id) },
                 }, el('span', { text: tag.name }), el('span', { cls: 'pt-tag-chip-count', text: String(getTagUsage(tag.id)) }));
                 styleTagChip(chip, tag.color);
                 const del = el('button', {
-                    cls: 'pt-chip-delete', title: 'Delete tag everywhere', attrs: { type: 'button' },
+                    cls: 'pt-chip-delete', title: 'Delete tag everywhere', attrs: { type: 'button', 'aria-label': `Delete ${tag.name} everywhere`, 'data-pt-focus': `delete-tag:${tag.id}` },
                     on: {
                         click: (e) => {
                             e.stopPropagation();
-                            if (del.classList.contains('pt-armed')) {
-                                const wasFiltering = view.tags.includes(tag.id);
-                                deleteTag(tag.id);
-                                render(); scheduleDecorate(); renderTagBar();
-                                if (wasFiltering) refreshListSoon();
-                            } else {
-                                del.classList.add('pt-armed');
-                                setTimeout(() => del.classList.remove('pt-armed'), 3000);
-                            }
+                            if (!body.isConnected || !personaExists(avatarId)) return;
+                            confirmation.activate();
                         },
                     },
                 }, icon('fa-trash-can'));
+                const confirmation = createConfirmation(() => {
+                    const wasFiltering = view.tags.includes(tag.id);
+                    if (deleteTag(tag.id)) saveSettings();
+                    view.tags = view.tags.filter(id => id !== tag.id);
+                    render(); scheduleDecorate(); renderTagBar();
+                    if (wasFiltering) refreshListSoon();
+                }, armed => {
+                    del.classList.toggle('pt-armed', armed);
+                    del.setAttribute('aria-label', `${armed ? 'Confirm delete' : 'Delete'} ${tag.name} everywhere`);
+                });
+                confirmations.push(confirmation);
                 del.style.color = contrastColor(tag.color);
-                chip.append(del);
-                available.append(chip);
+                group.append(chip, del);
+                available.append(group);
             }
+            restoreFocus();
         }
 
-        const nameInput = el('input', { cls: 'pt-input', attrs: { type: 'text', placeholder: 'New tag name' } });
-        const colorInput = el('input', { cls: 'pt-color-input', attrs: { type: 'color' } });
+        const nameInput = el('input', { cls: 'pt-input', attrs: { type: 'text', placeholder: 'New tag name', 'aria-label': 'New tag name' } });
+        const colorInput = el('input', { cls: 'pt-color-input', attrs: { type: 'color', 'aria-label': 'Tag color' } });
         colorInput.value = randomTagColor();
         const shuffleBtn = el('button', {
             cls: 'pt-icon-btn', title: 'Random color', attrs: { type: 'button' },
@@ -1050,8 +1386,10 @@
                 click: () => {
                     const name = nameInput.value.trim();
                     if (!name) { nameInput.focus(); return; }
+                    if (!body.isConnected || !personaExists(avatarId)) return;
                     const tag = createTag(name, colorInput.value);
                     toggleTagOn(avatarId, tag.id);
+                    saveSettings();
                     nameInput.value = '';
                     colorInput.value = randomTagColor();
                     render();
@@ -1060,7 +1398,7 @@
                 },
             },
         }, icon('fa-plus'), el('span', { text: 'Add' }));
-        nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } });
+        nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !isComposingKey(e)) { e.preventDefault(); e.stopPropagation(); addBtn.click(); } });
 
         body.append(
             el('div', { cls: 'pt-popover-section-title', text: 'Assigned' }),
@@ -1115,7 +1453,35 @@
     // ============================================
 
     let quickMenu = null;
+    let quickMenuState = 'closed';
+    let quickMenuRequest = 0;
     let quickMenuKeyHandler = null;
+    let stopQuickMenuPositioning = null;
+
+    function setQuickStatus(message = '') {
+        const status = document.getElementById('pt-quick-status');
+        if (status) status.textContent = message;
+    }
+
+    function isQuickMenuTarget(target) {
+        return !!target?.closest?.('#quickPersonaMenu, #quickPersona');
+    }
+
+    function handleQuickMenuKeydown(e) {
+        if (quickMenuState === 'closed' || !isQuickMenuTarget(e.target)) return;
+        if (isComposingKey(e)) return;
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            closeQuickMenu({ restoreFocus: true });
+            return;
+        }
+        quickMenuKeyHandler?.(e);
+    }
+
+    function dismissQuickMenuOutside(e) {
+        if (quickMenuState !== 'closed' && !isQuickMenuTarget(e.target)) closeQuickMenu();
+    }
 
     function addQuickButton() {
         if (document.getElementById('quickPersona')) return;
@@ -1123,21 +1489,29 @@
         const caret = el('div', { cls: 'pt-quick-caret fa-solid fa-caret-up fa-fw', attrs: { id: 'quickPersonaCaret' } });
         const btn = el('div', {
             cls: 'interactable pt-quick-btn',
-            attrs: { id: 'quickPersona', tabindex: '0' },
+            attrs: { id: 'quickPersona', tabindex: '0', role: 'button', 'aria-label': 'Switch persona', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'quickPersonaMenu' },
             on: {
                 click: () => toggleQuickMenu(),
                 // stopPropagation: ST's global keyboard handler would synthesize a
                 // second click on this .interactable div, toggling the menu twice.
-                keydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleQuickMenu(); } },
+                keydown: (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault(); e.stopPropagation();
+                        if (!e.repeat && !isComposingKey(e)) toggleQuickMenu();
+                    }
+                },
                 mouseenter: () => {
                     const cur = getCurrentAvatar();
-                    if (cur && !quickMenu) showTooltip(btn, getPersonaName(cur), getPersonaTitle(cur));
+                    if (cur && quickMenuState === 'closed') showTooltip(btn, getPersonaName(cur), getPersonaTitle(cur));
                 },
                 mouseleave: hideTooltip,
             },
         }, img, caret);
         const form = document.getElementById('leftSendForm');
-        if (form) form.append(btn);
+        if (form) form.append(btn, el('span', {
+            cls: 'pt-quick-status',
+            attrs: { id: 'pt-quick-status', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' },
+        }));
     }
 
     function updateQuickButton(force = false) {
@@ -1158,41 +1532,89 @@
     }
 
     async function toggleQuickMenu() {
-        if (quickMenu) { closeQuickMenu(); return; }
+        if (quickMenuState !== 'closed') { closeQuickMenu(); return; }
         await openQuickMenu();
     }
 
-    function closeQuickMenu() {
-        if (!quickMenu) return;
+    function closeQuickMenu({ restoreFocus = false } = {}) {
+        if (quickMenuState === 'closed') return;
+        quickMenuRequest++;
+        quickMenuState = 'closed';
         const menu = quickMenu;
         quickMenu = null;
-        if (quickMenuKeyHandler) { document.removeEventListener('keydown', quickMenuKeyHandler, true); quickMenuKeyHandler = null; }
-        menu.classList.remove('pt-open');
+        quickMenuKeyHandler = null;
+        stopQuickMenuPositioning?.();
+        stopQuickMenuPositioning = null;
+        setQuickStatus();
+        const trigger = document.getElementById('quickPersona');
+        trigger?.setAttribute('aria-expanded', 'false');
+        trigger?.removeAttribute('aria-busy');
         document.getElementById('quickPersonaCaret')?.classList.replace('fa-caret-down', 'fa-caret-up');
         hideTooltip();
-        setTimeout(() => menu.remove(), 180);
+        if (menu) {
+            // The fading menu must not retain focus, accept activation, or share
+            // an ID with a new menu opened before this transition finishes.
+            menu.removeAttribute('id');
+            menu.setAttribute('aria-hidden', 'true');
+            menu.inert = true;
+            menu.classList.remove('pt-open');
+            setTimeout(() => menu.remove(), 180);
+        }
+        if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
     }
 
     async function openQuickMenu() {
-        if (!personasApi) return;
+        if (!personasApi || quickMenuState !== 'closed') return;
+        const request = ++quickMenuRequest;
+        quickMenuState = 'opening';
+        document.getElementById('quickPersona')?.setAttribute('aria-busy', 'true');
+        setQuickStatus('Loading personas…');
         hideTooltip(); // cancel the quick button's pending hover tooltip
         let avatars = [];
-        try { avatars = await personasApi.getUserAvatars(false) || []; }
-        catch (e) { error('failed to fetch avatars', e); return; }
-        if (quickMenu) return; // double-toggle while awaiting
+        try {
+            avatars = await personasApi.getUserAvatars(false);
+            if (request !== quickMenuRequest || quickMenuState !== 'opening') return;
+            if (!Array.isArray(avatars)) throw new Error('Avatar request did not return a persona list');
+        }
+        catch (e) {
+            if (request !== quickMenuRequest) return;
+            closeQuickMenu();
+            setQuickStatus('Could not load personas. Activate Switch persona to retry.');
+            error('failed to fetch avatars', e);
+            return;
+        }
+        if (request !== quickMenuRequest || quickMenuState !== 'opening') return;
 
         const current = getCurrentAvatar();
-        const menu = el('div', { cls: 'pt-quick-menu', attrs: { id: 'quickPersonaMenu', role: 'menu' } });
+        const menu = el('div', { cls: 'pt-quick-menu', attrs: { id: 'quickPersonaMenu', role: 'menu', tabindex: '-1', 'aria-label': 'Personas' } });
         const list = el('div', { cls: 'pt-quick-list' });
+        const emptyState = el('div', {
+            cls: `pt-empty${avatars.length ? ' pt-hidden' : ''}`,
+            text: 'No personas available',
+            attrs: { role: 'status' },
+        });
         const rows = []; // flat list of rows for keyboard nav
+        const parentFolders = new WeakMap();
         let activeIdx = -1;
+        let activeOwner = menu;
+
+        function addRow(row) {
+            row.id = `pt-quick-row-${request}-${rows.length}`;
+            rows.push(row);
+            list.append(row);
+        }
 
         function setActive(idx) {
             if (rows[activeIdx]) rows[activeIdx].classList.remove('pt-active');
             activeIdx = idx;
             if (rows[activeIdx]) {
                 rows[activeIdx].classList.add('pt-active');
+                activeOwner.setAttribute('aria-activedescendant', rows[activeIdx].id);
+                menu.setAttribute('aria-activedescendant', rows[activeIdx].id);
                 rows[activeIdx].scrollIntoView({ block: 'nearest' });
+            } else {
+                activeOwner.removeAttribute('aria-activedescendant');
+                menu.removeAttribute('aria-activedescendant');
             }
         }
 
@@ -1202,11 +1624,18 @@
             const isCurrent = avatarId === current;
             const row = el('div', {
                 cls: `pt-quick-row${isCurrent ? ' pt-current' : ''}${indent ? ' pt-indent' : ''}`,
-                attrs: { role: 'menuitem', 'data-search': `${name} ${title}`.toLowerCase() },
+                attrs: { role: 'menuitemradio', 'aria-checked': String(isCurrent), 'data-avatar-id': avatarId, 'data-search': `${name} ${title}`.toLowerCase() },
                 on: {
+                    mousedown: (e) => e.preventDefault(),
                     click: async () => {
-                        closeQuickMenu();
-                        try { await personasApi.setUserAvatar(avatarId); } catch (e) { error('setUserAvatar failed', e); }
+                        if (quickMenu !== menu || quickMenuState !== 'open') return;
+                        closeQuickMenu({ restoreFocus: true });
+                        const selectionRequest = quickMenuRequest;
+                        try { await personasApi.setUserAvatar(avatarId); }
+                        catch (e) {
+                            if (selectionRequest === quickMenuRequest) setQuickStatus('Could not switch persona. Activate Switch persona to retry.');
+                            error('setUserAvatar failed', e);
+                        }
                         updateQuickButton();
                     },
                     mouseenter: () => showTooltip(row, name, title),
@@ -1233,13 +1662,18 @@
         for (const folder of folders) {
             const memberRows = [];
             const expandedByDefault = folder.members.includes(current);
+            const description = getFolderDescription(folder.name);
             const folderRow = el('div', {
                 cls: `pt-quick-row pt-quick-folder${expandedByDefault ? ' pt-expanded' : ''}`,
-                attrs: { role: 'menuitem', 'data-search': `${folder.name} ${settings.folderDescriptions[folder.name] || ''}`.toLowerCase() },
+                attrs: { role: 'menuitem', 'aria-expanded': String(expandedByDefault) },
                 on: {
+                    mousedown: (e) => e.preventDefault(),
                     click: () => {
+                        if (quickMenu !== menu || quickMenuState !== 'open') return;
                         const expanded = folderRow.classList.toggle('pt-expanded');
+                        folderRow.setAttribute('aria-expanded', String(expanded));
                         memberRows.forEach(r => r.classList.toggle('pt-hidden', !expanded));
+                        if (!expanded && memberRows.includes(rows[activeIdx])) setActive(rows.indexOf(folderRow));
                     },
                 },
             },
@@ -1249,59 +1683,58 @@
                 ),
                 el('div', { cls: 'pt-quick-info' },
                     el('div', { cls: 'pt-quick-name', text: folder.name }),
-                    settings.folderDescriptions[folder.name] ? el('div', { cls: 'pt-quick-sub', text: settings.folderDescriptions[folder.name] }) : null,
+                    description ? el('div', { cls: 'pt-quick-sub', text: description }) : null,
                 ),
                 el('span', { cls: 'pt-quick-count', text: String(folder.members.length) }),
                 icon('fa-chevron-right pt-chevron'),
             );
-            list.append(folderRow);
-            rows.push(folderRow);
+            addRow(folderRow);
             for (const id of folder.members) {
                 const row = personaRow(id, true);
+                parentFolders.set(row, folderRow);
                 if (!expandedByDefault) row.classList.add('pt-hidden');
                 memberRows.push(row);
-                list.append(row);
-                rows.push(row);
+                addRow(row);
             }
         }
 
-        if (folders.length && ungrouped.length) list.append(el('div', { cls: 'pt-quick-separator' }));
+        const separator = folders.length && ungrouped.length ? el('div', { cls: 'pt-quick-separator' }) : null;
+        if (separator) list.append(separator);
         for (const id of ungrouped) {
             const row = personaRow(id);
-            list.append(row);
-            rows.push(row);
-        }
-
-        function isRowFolderExpanded(memberRow) {
-            let node = memberRow.previousElementSibling;
-            while (node) {
-                if (node.classList.contains('pt-quick-folder')) return node.classList.contains('pt-expanded');
-                node = node.previousElementSibling;
-            }
-            return false;
+            addRow(row);
         }
 
         const searchInput = el('input', {
             cls: 'pt-input pt-quick-search',
-            attrs: { type: 'search', placeholder: 'Search personas…' },
+            attrs: { type: 'search', placeholder: 'Search personas…', 'aria-label': 'Search personas', 'aria-controls': 'quickPersonaMenu' },
             on: {
                 input: () => {
                     const needle = searchInput.value.trim().toLowerCase();
+                    const shownAvatars = new Set();
                     for (const row of rows) {
                         if (!needle) {
-                            const isMember = row.classList.contains('pt-indent');
-                            row.classList.toggle('pt-hidden', isMember && !isRowFolderExpanded(row));
+                            const folder = parentFolders.get(row);
+                            row.classList.toggle('pt-hidden', !!folder && !folder.classList.contains('pt-expanded'));
                         } else {
+                            const avatarId = row.getAttribute('data-avatar-id');
                             const match = (row.getAttribute('data-search') || '').includes(needle);
-                            row.classList.toggle('pt-hidden', !match || row.classList.contains('pt-quick-folder'));
+                            const show = !!avatarId && match && !shownAvatars.has(avatarId);
+                            row.classList.toggle('pt-hidden', !show);
+                            if (show) shownAvatars.add(avatarId);
                         }
+                        row.classList.toggle('pt-search-result', !!needle && row.hasAttribute('data-avatar-id'));
                     }
+                    separator?.classList.toggle('pt-hidden', !!needle);
+                    emptyState.textContent = needle ? 'No matching personas' : 'No personas available';
+                    emptyState.classList.toggle('pt-hidden', rows.some(row => !row.classList.contains('pt-hidden')));
                     setActive(-1);
                 },
             },
         });
 
         const showSearch = avatars.length > 6;
+        activeOwner = showSearch ? searchInput : menu;
         menu.append(
             el('div', { cls: 'pt-quick-header' },
                 el('span', { cls: 'pt-quick-header-title', text: 'Personas' }),
@@ -1309,47 +1742,43 @@
             ),
             showSearch ? searchInput : null,
             list,
+            emptyState,
         );
 
         quickMenuKeyHandler = (e) => {
-            if (!quickMenu) return;
-            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeQuickMenu(); return; }
+            if (quickMenu !== menu) return;
+            if (e.altKey || e.ctrlKey || e.metaKey || isComposingKey(e)) return;
             const visible = rows.filter(r => !r.classList.contains('pt-hidden'));
             if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();
+                e.stopPropagation();
                 if (!visible.length) return;
                 const currentVisibleIdx = visible.indexOf(rows[activeIdx]);
                 const nextVisibleIdx = e.key === 'ArrowDown'
                     ? (currentVisibleIdx + 1) % visible.length
                     : currentVisibleIdx <= 0 ? visible.length - 1 : currentVisibleIdx - 1;
                 setActive(rows.indexOf(visible[nextVisibleIdx]));
+                return;
             }
-            if (e.key === 'Enter' && rows[activeIdx] && !rows[activeIdx].classList.contains('pt-hidden')) {
+            if (e.key === 'Enter' || (e.key === ' ' && e.target === menu)) {
                 e.preventDefault();
-                rows[activeIdx].click();
+                e.stopPropagation();
+                if (e.repeat) return;
+                if (rows[activeIdx] && !rows[activeIdx].classList.contains('pt-hidden')) rows[activeIdx].click();
             }
         };
-        document.addEventListener('keydown', quickMenuKeyHandler, true);
 
         document.body.append(menu);
-        positionQuickMenu(menu);
+        stopQuickMenuPositioning = trackOverlayPosition(menu, document.getElementById('quickPersona'), { preferAbove: true });
         quickMenu = menu;
+        quickMenuState = 'open';
+        setQuickStatus();
+        const trigger = document.getElementById('quickPersona');
+        trigger?.removeAttribute('aria-busy');
+        trigger?.setAttribute('aria-expanded', 'true');
         document.getElementById('quickPersonaCaret')?.classList.replace('fa-caret-up', 'fa-caret-down');
-        requestAnimationFrame(() => menu.classList.add('pt-open'));
-        if (showSearch) searchInput.focus();
-    }
-
-    function positionQuickMenu(menu) {
-        const btn = document.getElementById('quickPersona');
-        if (!btn) return;
-        const rect = btn.getBoundingClientRect();
-        const mr = menu.getBoundingClientRect();
-        let left = rect.left;
-        let top = rect.top - mr.height - 8;
-        left = Math.max(8, Math.min(left, window.innerWidth - mr.width - 8));
-        if (top < 8) top = Math.min(rect.bottom + 8, window.innerHeight - mr.height - 8);
-        menu.style.left = `${left}px`;
-        menu.style.top = `${top}px`;
+        requestAnimationFrame(() => { if (quickMenu === menu) menu.classList.add('pt-open'); });
+        activeOwner.focus({ preventScroll: true });
     }
 
     // ============================================
@@ -1359,11 +1788,15 @@
     function onPersonaDeleted(payload) {
         const avatarId = payload && typeof payload === 'object' ? payload.avatarId : payload;
         if (avatarId) {
+            const affectedFolders = new Set(getFoldersOf(avatarId));
+            const hadFolders = Object.hasOwn(settings.personaGroups, avatarId);
+            const hadTags = Object.hasOwn(settings.persona_tag_map, avatarId);
             delete settings.personaGroups[avatarId];
             delete settings.persona_tag_map[avatarId];
-            if (view.folder && !getFolderMembers(view.folder).length) view.folder = null;
-            pruneOrphanDescriptions();
-            saveSettings();
+            const pruned = pruneOrphanDescriptions();
+            if (hadFolders || hadTags || pruned) saveSettings();
+            if (activePopover?.personaId === avatarId) closePopover();
+            reconcileFolderUi(affectedFolders);
         }
         updateQuickButton();
         scheduleDecorate();
@@ -1380,8 +1813,9 @@
     async function init() {
         settings = getSettings();
         await loadPersonasApi();
-        await migrateFromOldExtensions();
-        pruneOrphanDescriptions();
+        const migrated = await migrateFromOldExtensions();
+        const pruned = pruneOrphanDescriptions();
+        if (migrated || pruned) saveSettings();
         installFilter();
 
         addQuickButton();
@@ -1398,23 +1832,32 @@
             // Duplicates inherit the source persona's folders and tags, so
             // duplicating inside a folder keeps the copy in that folder.
             if (newId && srcId) {
-                if (settings.personaGroups[srcId]?.length) settings.personaGroups[newId] = [...settings.personaGroups[srcId]];
-                if (settings.persona_tag_map[srcId]?.length) settings.persona_tag_map[newId] = [...settings.persona_tag_map[srcId]];
-                saveSettings();
+                let inherited = false;
+                if (settings.personaGroups[srcId]?.length) {
+                    settings.personaGroups[newId] = [...settings.personaGroups[srcId]];
+                    inherited = true;
+                }
+                if (settings.persona_tag_map[srcId]?.length) {
+                    settings.persona_tag_map[newId] = [...settings.persona_tag_map[srcId]];
+                    inherited = true;
+                }
+                if (inherited) saveSettings();
             }
             // A persona created OUTSIDE the current folder/tag scope would be
             // filtered out of ST's post-create render and look like the creation
             // failed — drop back to the root view unless it's visible here.
             // (The event fires before ST's re-render, so its own navigation to
             // the new card works natively either way.)
-            const visibleHere = view.folder
-                ? !!(newId && (settings.personaGroups[newId] || []).includes(view.folder))
-                : view.tags.length
-                    ? !!(newId && hasAllTags(newId, view.tags))
-                    : true;
-            if (!visibleHere && personasApi.isPersonaPanelOpen?.()) {
-                view.folder = null;
-                view.tags = [];
+            if (newId && personasApi.isPersonaPanelOpen?.()) {
+                const outsideFolder = view.folder && !isSearchActive() && !getFoldersOf(newId).includes(view.folder);
+                const excludedByTags = view.tags.length && !hasAllTags(newId, view.tags);
+                if (outsideFolder) view.folder = null;
+                if (excludedByTags) view.tags = [];
+                // The unfiltered root hides grouped personas, including copies
+                // created while already at the root. Reveal their first folder.
+                if (!view.folder && !view.tags.length && !isSearchActive()) {
+                    view.folder = getAllFolders().find(folder => folder.members.includes(newId))?.name || null;
+                }
                 renderTagBar();
             }
             updateQuickButton();
@@ -1426,15 +1869,11 @@
         if (event_types.PERSONA_UPDATED) eventSource.on(event_types.PERSONA_UPDATED, updateQuickButton);
         if (event_types.PERSONA_DELETED) eventSource.on(event_types.PERSONA_DELETED, onPersonaDeleted);
 
-        document.addEventListener('click', (e) => {
-            if (quickMenu && !e.target.closest('#quickPersonaMenu') && !e.target.closest('#quickPersona')) {
-                closeQuickMenu();
-            }
-            if (e.target.closest('#persona_set_image_button')) pendingAvatarRefresh = true;
-        });
-        document.addEventListener('change', (e) => {
-            if (e.target && e.target.id === 'avatar_upload_file') pendingAvatarRefresh = true;
-        });
+        document.addEventListener('keydown', handleQuickMenuKeydown, true);
+        document.addEventListener('pointerdown', dismissQuickMenuOutside, true);
+        document.addEventListener('focusin', dismissQuickMenuOutside, true);
+        window.addEventListener('blur', () => closeQuickMenu());
+        document.addEventListener('click', dismissQuickMenuOutside);
 
         // ST's own search re-renders the list and our observer re-decorates, but
         // clearing the box must also restore the folder/tag view scoping.
