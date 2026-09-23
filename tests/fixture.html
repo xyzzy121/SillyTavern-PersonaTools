@@ -24,6 +24,8 @@
         .avatar-container img { width: 50px; height: 50px; }
         .character_name_block { display: flex; align-items: center; min-height: 30px; }
         .persona-main { flex: 1; min-width: 0; }
+        .ch_additional_info, .ch_description { overflow-wrap: anywhere; }
+        .ch_description { max-height: 3em; overflow: hidden; white-space: pre-wrap; }
         #user_avatar_block.gridView .avatar-container { width: 30%; max-width: 100px; height: min-content; flex-direction: column; align-items: flex-start; overflow: hidden; }
         #user_avatar_block.gridView .character_select_container { width: 100%; max-width: 100px; }
         #user_avatar_block.gridView .character_name_block { width: 100%; flex-direction: column; }
@@ -49,6 +51,10 @@
                 <button id="previous-page">Previous</button><output id="page-status"></output><button id="next-page">Next</button>
             </div>
             <div id="user_avatar_block"></div>
+        </div>
+        <div class="persona_management_right_column">
+            <label>Active persona name <input id="your_name" aria-label="Active persona name" readonly></label>
+            <label>Active persona description <textarea id="persona_description" aria-label="Active persona description" readonly></textarea></label>
         </div>
     </main>
     <div id="leftSendForm"><input id="chat-input" aria-label="Chat input"></div>

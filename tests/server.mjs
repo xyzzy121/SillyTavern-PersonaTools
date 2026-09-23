@@ -9,10 +9,14 @@ const routes = new Map([
     ['/', ['fixture.html', 'text/html']],
     ['/fixture.js', ['fixture.js', 'text/javascript']],
     ['/index.js', ['../index.js', 'text/javascript']],
+    ['/find-replace-worker.js', ['../find-replace-worker.js', 'text/javascript']],
     ['/style.css', ['../style.css', 'text/css']],
 ]);
 const modules = new Map([
-    ['/script.js', 'export const settings = window.PTFixture.legacySettings;'],
+    ['/script.js', `
+        export const settings = window.PTFixture.legacySettings;
+        export function setUserName(value, options) { return window.PTFixture.setUserName(value, options); }
+    `],
     ['/scripts/power-user.js', 'export const power_user = window.PTFixture.powerUser;'],
     ['/scripts/personas.js', `
         export const personasFilter = window.PTFixture.filter;
@@ -24,6 +28,7 @@ const modules = new Map([
             user_avatar = id;
             await window.PTFixture.selectAvatar(id);
         }
+        export function setPersonaDescription() { return window.PTFixture.setPersonaDescription(); }
         export function isPersonaPanelOpen() { return window.PTFixture.drawerOpen; }
     `],
 ]);

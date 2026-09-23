@@ -1,16 +1,25 @@
 (() => {
     const seed = window.fixtureSeed || {};
     const saved = JSON.parse(localStorage.getItem('personaToolsFixture') || 'null');
+    const nativeSaved = JSON.parse(localStorage.getItem('personaToolsFixtureNative') || 'null');
     const extensionSettings = saved || structuredClone(seed.extensionSettings || {});
-    const names = seed.personas || { 'alice.png': 'Alice', 'bob.png': 'Bob', 'cara.png': 'Cara' };
+    const names = nativeSaved?.personas || seed.personas || { 'alice.png': 'Alice', 'bob.png': 'Bob', 'cara.png': 'Cara' };
+    const descriptions = structuredClone(nativeSaved?.descriptions || seed.descriptions || {});
+    const currentAvatar = nativeSaved?.currentAvatar ?? seed.currentAvatar ?? Object.keys(names)[0];
+    const username = nativeSaved?.username ?? seed.username ?? names[currentAvatar] ?? '';
+    const activeDescription = nativeSaved?.persona_description ?? seed.persona_description ?? descriptions[currentAvatar]?.description ?? '';
     const listeners = new Map();
     const searchData = { persona_search: '' };
     const host = window.PTFixture = {
         extensionSettings,
         legacySettings: seed.legacySettings || {},
-        powerUser: { personas: { ...names }, persona_descriptions: seed.descriptions || {} },
-        avatars: Object.keys(names),
-        currentAvatar: seed.currentAvatar || Object.keys(names)[0],
+        powerUser: { personas: { ...names }, persona_descriptions: descriptions, persona_description: activeDescription },
+        avatars: nativeSaved?.avatars || Object.keys(names),
+        currentAvatar,
+        username,
+        setUserNameCalls: [],
+        descriptionRefreshCalls: 0,
+        emittedEvents: [],
         page: 1,
         pageSize: seed.pageSize || 5,
         totalPages: 1,
@@ -35,7 +44,10 @@
             filterFunctions: {},
             getFilterData(key) { return searchData[key]; },
         },
-        emit(type, payload) { for (const fn of listeners.get(type) || []) fn(payload); },
+        async emit(type, payload) {
+            host.emittedEvents.push({ type, payload: structuredClone(payload) });
+            await Promise.all((listeners.get(type) || []).map(fn => fn(payload)));
+        },
         thumbnailUrl(id) {
             const key = seed.avatarCacheKey;
             return key ? `/fixture/cached-avatar.svg?key=${encodeURIComponent(key)}&avatar=${encodeURIComponent(id)}` : `/avatars/${encodeURIComponent(id)}`;
@@ -46,7 +58,32 @@
             if (!response.ok) throw new Error('Failed to revise fixture avatar');
             await fetch(host.thumbnailUrl(id), { cache: 'reload' });
         },
-        flushSaves() { localStorage.setItem('personaToolsFixture', JSON.stringify(extensionSettings)); },
+        flushSaves() {
+            localStorage.setItem('personaToolsFixture', JSON.stringify(extensionSettings));
+            localStorage.setItem('personaToolsFixtureNative', JSON.stringify({
+                personas: host.powerUser.personas,
+                descriptions: host.powerUser.persona_descriptions,
+                avatars: host.avatars,
+                currentAvatar: host.currentAvatar,
+                username: host.username,
+                persona_description: host.powerUser.persona_description,
+            }));
+        },
+        saveSettingsDebounced() {
+            host.saveCalls++;
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(host.flushSaves, 10);
+        },
+        setUserName(value, { toastPersonaNameChange = true } = {}) {
+            host.setUserNameCalls.push({ value, toastPersonaNameChange });
+            host.username = value;
+            document.getElementById('your_name').value = value;
+            host.saveSettingsDebounced();
+        },
+        setPersonaDescription() {
+            host.descriptionRefreshCalls++;
+            document.getElementById('persona_description').value = host.powerUser.persona_description;
+        },
         render() {
             host.renderCompletions++;
             let ids = host.avatars.filter(id => host.powerUser.personas[id].toLowerCase().includes(searchData.persona_search.toLowerCase().trim()));
@@ -75,7 +112,14 @@
                 title.className = 'ch_name';
                 title.textContent = host.powerUser.personas[id];
                 name.append(title);
-                main.append(name);
+                const descriptor = host.powerUser.persona_descriptions[id] || {};
+                const additionalInfo = document.createElement('div');
+                additionalInfo.className = 'ch_additional_info';
+                additionalInfo.textContent = descriptor.title || '';
+                const description = document.createElement('div');
+                description.className = 'ch_description';
+                description.textContent = descriptor.description || '';
+                main.append(name, additionalInfo, description);
                 card.append(img, main);
                 card.addEventListener('click', async () => {
                     const api = await import('/scripts/personas.js');
@@ -119,18 +163,25 @@
         async selectAvatar(id) {
             host.selectionCalls.push(id);
             host.currentAvatar = id;
-            host.emit('PERSONA_CHANGED');
+            host.setUserName(host.powerUser.personas[id], { toastPersonaNameChange: false });
+            host.powerUser.persona_description = host.powerUser.persona_descriptions[id]?.description || '';
+            host.setPersonaDescription();
+            await host.emit('PERSONA_CHANGED');
         },
         async duplicate(id, copyId) {
             host.powerUser.personas[copyId] = `${host.powerUser.personas[id]} copy`;
+            if (host.powerUser.persona_descriptions[id]) host.powerUser.persona_descriptions[copyId] = structuredClone(host.powerUser.persona_descriptions[id]);
             host.avatars.push(copyId);
-            host.emit('PERSONA_CREATED', { avatarId: copyId, duplicatedFromAvatarId: id });
+            await host.emit('PERSONA_CREATED', { avatarId: copyId, duplicatedFromAvatarId: id });
+            host.saveSettingsDebounced();
             host.render();
         },
         async delete(id) {
             delete host.powerUser.personas[id];
+            delete host.powerUser.persona_descriptions[id];
             host.avatars = host.avatars.filter(item => item !== id);
-            host.emit('PERSONA_DELETED', { avatarId: id });
+            await host.emit('PERSONA_DELETED', { avatarId: id });
+            host.saveSettingsDebounced();
             host.render();
         },
     };
@@ -138,13 +189,12 @@
     window.SillyTavern = { getContext: () => ({
         extensionSettings,
         powerUserSettings: host.powerUser,
-        saveSettingsDebounced() {
-            host.saveCalls++;
-            clearTimeout(saveTimer);
-            saveTimer = setTimeout(host.flushSaves, 10);
-        },
+        saveSettingsDebounced: host.saveSettingsDebounced,
         event_types: Object.fromEntries(['CHAT_CHANGED', 'SETTINGS_UPDATED', 'PERSONA_CHANGED', 'PERSONA_CREATED', 'PERSONA_RENAMED', 'PERSONA_UPDATED', 'PERSONA_DELETED'].map(name => [name, name])),
-        eventSource: { on(type, fn) { if (!listeners.has(type)) listeners.set(type, []); listeners.get(type).push(fn); } },
+        eventSource: {
+            on(type, fn) { if (!listeners.has(type)) listeners.set(type, []); listeners.get(type).push(fn); },
+            emit: host.emit,
+        },
         getThumbnailUrl: (_, id) => host.thumbnailUrl(id),
     }) };
     window.jQuery = (arg) => {
@@ -197,5 +247,7 @@
         const control = event.target.closest('.menu_button, .interactable');
         if (control) control.click();
     });
+    document.getElementById('your_name').value = host.username;
+    document.getElementById('persona_description').value = host.powerUser.persona_description;
     host.render();
 })();

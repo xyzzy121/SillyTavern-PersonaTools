@@ -565,6 +565,7 @@
         decorateNativeCards(block);
         updateFolderHeader();
         renderTagBar();
+        createFindReplaceButton();
         // With every persona foldered, the root list has zero native entries and
         // ST's pagination navigator renders a confusing "1-0 .. 0" — hide it.
         const panel = document.querySelector(SEL.panel);
@@ -1071,6 +1072,282 @@
                 reset();
             },
         };
+    }
+
+    // --- Bulk find and replace ---
+
+    const replacementFields = { name: 'Name', title: 'Title', description: 'Description' };
+
+    function readPersonaText(id, field) {
+        const value = field === 'name' ? powerUser.personas[id] : powerUser.persona_descriptions?.[id]?.[field];
+        return typeof value === 'string' ? value : '';
+    }
+
+    function replacementSnapshotIsCurrent(snapshot) {
+        return snapshot.every(({ id, fields }) => personaExists(id)
+            && Object.entries(fields).every(([field, before]) => readPersonaText(id, field) === before));
+    }
+
+    function createFindReplaceButton() {
+        const header = document.querySelector(SEL.headerRow);
+        if (!header || header.querySelector('.pt-find-replace')) return;
+        const button = el('button', {
+            cls: 'pt-find-replace menu_button', title: 'Find and replace',
+            attrs: { type: 'button', 'data-pt-focus': 'find-replace', 'aria-haspopup': 'dialog', 'aria-label': 'Find and replace' },
+            on: { click: () => openFindReplace(button) },
+        }, icon('fa-magnifying-glass'), el('span', { text: 'Find and replace' }));
+        header.append(button);
+    }
+
+    function openFindReplace(anchor) {
+        closeQuickMenu({ restoreFocus: false });
+        const body = openPopover(anchor, 'Find and replace', 'fa-magnifying-glass');
+        body.closest('.pt-popover').classList.add('pt-replace-dialog');
+        const session = activePopover;
+        const selected = new Set();
+        let preview = null;
+        let stopPreview = null;
+        let applying = false;
+        let generation = 0;
+        const controls = el('fieldset', { cls: 'pt-replace-controls' });
+        const search = el('input', { cls: 'pt-input text_pole', attrs: { type: 'search', 'aria-label': 'Search personas', placeholder: 'Search personas…' } });
+        const count = el('span', { cls: 'pt-replace-count', text: '0 selected', attrs: { 'aria-live': 'polite' } });
+        const picker = el('div', { cls: 'pt-popover-list pt-replace-picker', attrs: { 'aria-label': 'Personas' } });
+        const status = el('div', { cls: 'pt-replace-status', attrs: { role: 'status' } });
+        const feedback = el('div', { cls: 'pt-replace-error', attrs: { role: 'alert' } });
+        feedback.hidden = true;
+        const results = el('div', { cls: 'pt-replace-preview' });
+        const fieldInputs = {};
+        const fields = el('fieldset', { cls: 'pt-replace-fields' }, el('legend', { text: 'Search in' }));
+        for (const [field, label] of Object.entries(replacementFields)) {
+            const input = el('input', { attrs: { type: 'checkbox' }, on: { change: () => invalidate() } });
+            input.checked = true;
+            fieldInputs[field] = input;
+            fields.append(el('label', { cls: 'pt-check-row' }, input, el('span', { text: label })));
+        }
+        const find = el('textarea', { cls: 'pt-input text_pole', attrs: { rows: '2', 'aria-label': 'Find', spellcheck: 'false' }, on: { input: () => invalidate() } });
+        const replacement = el('textarea', { cls: 'pt-input text_pole', attrs: { rows: '2', 'aria-label': 'Replace with', spellcheck: 'false' }, on: { input: () => invalidate() } });
+        const matchCase = el('input', { attrs: { type: 'checkbox' }, on: { change: () => invalidate() } });
+        matchCase.checked = true;
+        const useRegex = el('input', { attrs: { type: 'checkbox' }, on: { change: () => { help.hidden = !useRegex.checked; invalidate(); } } });
+        const help = el('div', { cls: 'pt-replace-help', text: 'Enter a JavaScript pattern without / delimiters. All matches are replaced. Use $1 or $<name> for captures, $& for the match, and $$ for a literal $. Match case controls case sensitivity.' });
+        help.hidden = true;
+        const previewButton = el('button', { cls: 'menu_button', text: 'Preview changes', attrs: { type: 'button' }, on: { click: calculatePreview } });
+        const applyButton = el('button', { cls: 'menu_button pt-primary-btn', text: 'Apply replacements', attrs: { type: 'button' }, on: { click: applyPreview } });
+        applyButton.disabled = true;
+
+        function showError(message = '') {
+            feedback.textContent = message;
+            feedback.hidden = !message;
+        }
+
+        function invalidate(message = '') {
+            generation++;
+            stopPreview?.();
+            stopPreview = null;
+            preview = null;
+            applyButton.disabled = true;
+            previewButton.disabled = false;
+            results.replaceChildren();
+            status.textContent = '';
+            showError(message);
+        }
+
+        function matchingPersonas() {
+            const needle = search.value.trim().toLowerCase();
+            return Object.keys(powerUser.personas || {}).filter(id =>
+                !needle || [getPersonaName(id), getPersonaTitle(id), id].some(value => value.toLowerCase().includes(needle)))
+                .sort((a, b) => getPersonaName(a).localeCompare(getPersonaName(b)) || a.localeCompare(b));
+        }
+
+        function renderPicker() {
+            let removed = false;
+            for (const id of selected) if (!personaExists(id)) { selected.delete(id); removed = true; }
+            if (removed) invalidate('Persona data changed. Preview again before applying.');
+            const restoreFocus = rememberFocus(picker);
+            picker.replaceChildren();
+            for (const id of matchingPersonas()) {
+                const name = getPersonaName(id);
+                const input = el('input', {
+                    attrs: { type: 'checkbox', 'aria-label': `Select ${name} (${id})`, 'data-pt-focus': `replace-persona:${id}` },
+                    on: { change: () => {
+                        if (input.checked) selected.add(id); else selected.delete(id);
+                        count.textContent = `${selected.size} selected`;
+                        invalidate();
+                    } },
+                });
+                input.checked = selected.has(id);
+                const text = el('span', { cls: 'pt-replace-persona-text' },
+                    el('span', { text: name }),
+                    el('small', { text: [getPersonaTitle(id), id].filter(Boolean).join(' · ') }));
+                picker.append(el('label', { cls: 'pt-check-row' }, input,
+                    el('img', { cls: 'pt-member-thumb', attrs: { src: thumbUrl(id), alt: '', loading: 'lazy' } }), text));
+            }
+            if (!picker.children.length) picker.append(el('div', { cls: 'pt-empty', text: 'No matching personas' }));
+            count.textContent = `${selected.size} selected`;
+            restoreFocus();
+        }
+
+        function renderPreview(result) {
+            status.textContent = `${result.matchCount} matches; ${result.personaCount} personas and ${result.fieldCount} fields would change.`;
+            for (const change of result.changes) {
+                const details = el('details', {}, el('summary', { text: `${change.name} (${change.id})` }));
+                for (const field of change.fields) {
+                    details.append(el('div', { cls: 'pt-replace-field-preview', attrs: { 'data-field': field.field } },
+                        el('strong', { text: `${replacementFields[field.field]} — ${field.matches} matches` }),
+                        el('span', { text: 'Before' }), el('pre', { text: field.before, attrs: { 'data-version': 'before' } }),
+                        el('span', { text: 'After' }), el('pre', { text: field.after, attrs: { 'data-version': 'after' } })));
+                }
+                results.append(details);
+            }
+            if (result.invalidNames.length) {
+                showError(`Replacement would leave a blank persona name: ${result.invalidNames.map(item => `${item.name} (${item.id})`).join(', ')}. Change the replacement or exclude Name.`);
+            } else applyButton.disabled = result.changes.length === 0;
+        }
+
+        function calculatePreview() {
+            if (!body.isConnected || applying) return;
+            invalidate();
+            const chosenFields = Object.keys(fieldInputs).filter(field => fieldInputs[field].checked);
+            if (!selected.size) { showError('Select at least one persona.'); return; }
+            if (!chosenFields.length) { showError('Select at least one text field.'); return; }
+            if (!find.value.length) { showError('Enter text or a pattern to find.'); return; }
+            const snapshot = [...selected].map(id => ({ id, name: getPersonaName(id), fields: Object.fromEntries(chosenFields.map(field => [field, readPersonaText(id, field)])) }));
+            if (!replacementSnapshotIsCurrent(snapshot)) { showError('Persona data changed. Select personas and preview again.'); return; }
+            const request = generation;
+            let worker;
+            let timer;
+            const finish = () => {
+                clearTimeout(timer);
+                worker?.terminate();
+                stopPreview = null;
+                previewButton.disabled = false;
+            };
+            try {
+                worker = new Worker(new URL('./find-replace-worker.js', import.meta.url), { type: 'module' });
+                stopPreview = () => { clearTimeout(timer); worker.terminate(); };
+                status.textContent = 'Calculating preview…';
+                previewButton.disabled = true;
+                worker.onmessage = ({ data }) => {
+                    if (!body.isConnected || generation !== request) return;
+                    finish();
+                    status.textContent = '';
+                    if (data.error) { showError(data.error); return; }
+                    if (!replacementSnapshotIsCurrent(snapshot)) { invalidate('Persona data changed. Preview again before applying.'); return; }
+                    preview = { snapshot, result: data };
+                    renderPreview(data);
+                };
+                worker.onerror = (event) => {
+                    event.preventDefault();
+                    if (!body.isConnected || generation !== request) return;
+                    finish();
+                    status.textContent = '';
+                    showError('Could not calculate replacements. Please try again.');
+                };
+                timer = setTimeout(() => {
+                    if (!body.isConnected || generation !== request) return;
+                    finish();
+                    status.textContent = '';
+                    showError('Matching took longer than two seconds. Simplify the pattern or select fewer personas, then preview again.');
+                }, 2000);
+                worker.postMessage({ personas: snapshot, find: find.value, replacement: replacement.value, matchCase: matchCase.checked, useRegex: useRegex.checked });
+            } catch (e) {
+                finish();
+                status.textContent = '';
+                showError('Could not start matching. Please try again.');
+                error('Replacement worker failed', e);
+            }
+        }
+
+        async function applyPreview() {
+            if (!body.isConnected || applying || !preview || applyButton.disabled) return;
+            const ready = preview;
+            applying = true;
+            controls.disabled = true;
+            let committed = false;
+            try {
+                // Resolve the native setter before any write; loading a module can yield.
+                const { setUserName } = await import('/script.js');
+                if (!body.isConnected) return;
+                if (!replacementSnapshotIsCurrent(ready.snapshot)) {
+                    invalidate('Persona data changed. Preview again before applying.');
+                    renderPicker();
+                    return;
+                }
+                const activeId = getCurrentAvatar();
+                const activeChange = ready.result.changes.find(change => change.id === activeId);
+                if (activeChange?.fields.some(field => field.field === 'name') && typeof setUserName !== 'function') {
+                    throw new Error('Native persona name setter is unavailable');
+                }
+                // Complete all field writes synchronously before notifying listeners.
+                for (const change of ready.result.changes) {
+                    for (const { field, after } of change.fields) {
+                        if (field === 'name') powerUser.personas[change.id] = after;
+                        else {
+                            powerUser.persona_descriptions ||= {};
+                            powerUser.persona_descriptions[change.id] ||= {};
+                            powerUser.persona_descriptions[change.id][field] = after;
+                        }
+                        if (change.id === activeId && field === 'description') powerUser.persona_description = after;
+                    }
+                }
+                committed = true;
+                invalidate(); // This preview can never be applied a second time.
+                saveSettings();
+                let notificationFailed = false;
+                try {
+                    if (activeChange?.fields.some(field => field.field === 'name')) setUserName(powerUser.personas[activeId], { toastPersonaNameChange: false });
+                    if (activeChange) personasApi.setPersonaDescription();
+                } catch (e) { notificationFailed = true; error('Active persona refresh failed', e); }
+                for (const change of ready.result.changes) {
+                    const name = change.fields.find(field => field.field === 'name');
+                    const events = [];
+                    if (name && event_types.PERSONA_RENAMED) events.push([event_types.PERSONA_RENAMED, { avatarId: change.id, oldName: name.before, newName: name.after }]);
+                    if (event_types.PERSONA_UPDATED) events.push([event_types.PERSONA_UPDATED, change.id]);
+                    for (const [type, payload] of events) {
+                        try { await eventSource.emit(type, payload); }
+                        catch (e) { notificationFailed = true; error('Persona update listener failed', e); }
+                    }
+                }
+                await refreshList();
+                if (!body.isConnected) return;
+                renderPicker();
+                status.textContent = `Applied replacements to ${ready.result.personaCount} personas and ${ready.result.fieldCount} fields.`;
+                if (notificationFailed) showError('Replacements were applied, but a persona update listener failed. Reload to refresh the display.');
+                else if (listError && !listError.hidden) showError('Replacements were applied. Close this dialog and use Retry to reload the persona list.');
+            } catch (e) {
+                error('Could not apply replacements', e);
+                if (body.isConnected) showError(committed ? 'Replacements were applied, but the display could not refresh. Reload to refresh it.' : 'Could not apply replacements. No persona text was changed. Please try again.');
+            } finally {
+                applying = false;
+                controls.disabled = false;
+            }
+        }
+
+        search.addEventListener('input', renderPicker);
+        controls.append(
+            el('div', { cls: 'pt-popover-section-title', text: 'Choose personas' }), search,
+            el('div', { cls: 'pt-replace-selection-actions' },
+                el('button', { cls: 'menu_button', text: 'Select all results', attrs: { type: 'button' }, on: { click: () => { matchingPersonas().forEach(id => selected.add(id)); invalidate(); renderPicker(); } } }),
+                el('button', { cls: 'menu_button', text: 'Clear selection', attrs: { type: 'button' }, on: { click: () => { selected.clear(); invalidate(); renderPicker(); } } }), count),
+            picker, fields,
+            el('label', { cls: 'pt-replace-text-label' }, el('span', { text: 'Find' }), find),
+            el('label', { cls: 'pt-replace-text-label' }, el('span', { text: 'Replace with' }), replacement),
+            el('div', { cls: 'pt-replace-options' },
+                el('label', { cls: 'pt-check-row' }, matchCase, el('span', { text: 'Match case' })),
+                el('label', { cls: 'pt-check-row' }, useRegex, el('span', { text: 'Use regular expression' }))),
+            help, feedback, status, results,
+            el('div', { cls: 'pt-popover-footer' }, previewButton, applyButton));
+        body.append(controls);
+        session.refreshPersonas = () => {
+            if (applying) return;
+            let removed = false;
+            for (const id of selected) if (!personaExists(id)) { selected.delete(id); removed = true; }
+            if (removed || (preview && !replacementSnapshotIsCurrent(preview.snapshot))) invalidate('Persona data changed. Preview again before applying.');
+            renderPicker();
+        };
+        session.disposeContent = () => { generation++; stopPreview?.(); };
+        renderPicker();
     }
 
     // --- Popover: folders of one persona ---
@@ -1799,6 +2076,7 @@
             reconcileFolderUi(affectedFolders);
         }
         updateQuickButton();
+        activePopover?.refreshPersonas?.();
         scheduleDecorate();
     }
 
@@ -1861,12 +2139,13 @@
                 renderTagBar();
             }
             updateQuickButton();
+            activePopover?.refreshPersonas?.();
             scheduleDecorate();
         });
-        if (event_types.PERSONA_RENAMED) eventSource.on(event_types.PERSONA_RENAMED, () => { updateQuickButton(); scheduleDecorate(); });
+        if (event_types.PERSONA_RENAMED) eventSource.on(event_types.PERSONA_RENAMED, () => { updateQuickButton(); activePopover?.refreshPersonas?.(); scheduleDecorate(); });
         // PERSONA_UPDATED fires per keystroke while typing a persona description —
         // the quick-button refresh is cheap (src-compare, no fetch), so no decorate.
-        if (event_types.PERSONA_UPDATED) eventSource.on(event_types.PERSONA_UPDATED, updateQuickButton);
+        if (event_types.PERSONA_UPDATED) eventSource.on(event_types.PERSONA_UPDATED, () => { updateQuickButton(); activePopover?.refreshPersonas?.(); });
         if (event_types.PERSONA_DELETED) eventSource.on(event_types.PERSONA_DELETED, onPersonaDeleted);
 
         document.addEventListener('keydown', handleQuickMenuKeydown, true);

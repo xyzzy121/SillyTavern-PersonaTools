@@ -1,6 +1,6 @@
 # PersonaTools
 
-A SillyTavern extension for enhanced persona management: folders, tags and a quick persona switcher — in one extension that plays nicely with SillyTavern's own pagination, search and sorting.
+A SillyTavern extension for enhanced persona management: folders, tags, bulk find and replace, and a quick persona switcher — in one extension that plays nicely with SillyTavern's own pagination, search and sorting.
 
 ## Features
 
@@ -29,6 +29,16 @@ A SillyTavern extension for enhanced persona management: folders, tags and a qui
 - Click a tag chip on any persona card to toggle that filter
 - Explicit tag deletion (two-click confirm) — tags are never auto-deleted behind your back
 - Random color generator with light/dark palette toggle
+
+### Find and replace
+- Open **Find and replace** in the Persona Management header to edit multiple personas together.
+- Choose personas in the searchable checklist. It includes personas across all folders and pages, regardless of the main panel's filters. **Select all results** selects the current search results; changing the search preserves selections. **Clear selection** clears the entire selection.
+- Search **Name**, **Title**, and/or **Description**. All three fields are enabled initially. IDs, avatar files, lorebook links, folder names, tags, and other metadata are never replaced.
+- Enter the text to find and its replacement. Every non-overlapping occurrence is replaced. Matching is literal and case-sensitive by default; turn off **Match case** to ignore case. Empty replacement text deletes matches, and both fields support multiple lines.
+- Optionally enable **Use regular expression** for a JavaScript pattern without `/` delimiters. Matching is always global; **Match case** controls case sensitivity. Regex replacements support JavaScript tokens such as `$1`, `$<name>`, `$&`, and `$$`. In literal mode these tokens are ordinary text. No additional regex flag controls are provided.
+- Click **Preview changes** to see match counts and expandable before/after text. Nothing is saved until **Apply replacements** is clicked. Changing the inputs or selection requires another preview, as does an external change to the selected persona text. Closing the dialog discards the draft.
+- A replacement cannot leave a persona name blank; titles and descriptions can be emptied. Invalid patterns and matching that exceeds two seconds show an error without changing data. Narrow the selection or simplify the pattern to retry.
+- Applied changes use SillyTavern's normal settings save and update the active persona's name and description without switching personas or rewriting chat messages. If the persona list fails to reload after applying, close the dialog and use **Retry**; the replacements have already been applied.
 
 ### ⚡ Fast
 v2.0.0 is a ground-up rewrite. Instead of cloning and hiding SillyTavern's persona cards, PersonaTools now hooks into SillyTavern's own persona filter, so the native list stays native. No polling timers, no cache-busted avatar re-downloads, no retry ladders — everything reacts to SillyTavern's events and renders once.

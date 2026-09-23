@@ -1141,6 +1141,142 @@
     text-overflow: ellipsis;
 }
 
+/* Bulk find and replace */
+.pt-find-replace {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 5px 12px;
+    width: auto;
+    font-size: 0.85em;
+}
+
+.pt-popover.pt-replace-dialog {
+    width: min(640px, calc(var(--pt-viewport-width, 100vw) - 16px));
+    max-height: min(850px, calc(var(--pt-viewport-height, 100vh) - 16px));
+}
+
+.pt-replace-dialog .menu_button {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.pt-replace-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    border: 0;
+}
+
+.pt-replace-picker {
+    max-height: 190px;
+    min-height: 45px;
+    flex-shrink: 0;
+    border: 1px solid var(--pt-border);
+    border-radius: var(--pt-radius-sm);
+}
+
+.pt-replace-persona-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.pt-replace-persona-text small,
+.pt-replace-help,
+.pt-replace-count {
+    font-size: 0.8em;
+    color: var(--pt-muted);
+}
+
+.pt-replace-selection-actions,
+.pt-replace-options,
+.pt-replace-fields {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+}
+
+.pt-replace-fields {
+    border: 1px solid var(--pt-border);
+    border-radius: var(--pt-radius-sm);
+    padding: 4px 8px;
+    min-width: 0;
+}
+
+.pt-replace-fields legend {
+    font-size: 0.85em;
+    padding: 0 4px;
+}
+
+.pt-replace-text-label,
+.pt-replace-field-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+}
+
+.pt-replace-text-label textarea {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 52px;
+    max-height: 180px;
+}
+
+.pt-replace-error {
+    color: var(--pt-danger);
+    overflow-wrap: anywhere;
+}
+
+.pt-replace-preview details {
+    border: 1px solid var(--pt-border);
+    border-radius: var(--pt-radius-sm);
+    padding: 8px;
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+}
+
+.pt-replace-preview summary {
+    cursor: pointer;
+}
+
+.pt-replace-field-preview {
+    margin-top: 10px;
+}
+
+.pt-replace-field-preview pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 200px;
+    overflow-y: auto;
+    min-height: 1.5em;
+    margin: 0;
+    padding: 7px;
+    background: var(--pt-hover);
+    user-select: text;
+}
+
+.pt-replace-dialog .pt-popover-footer {
+    flex-wrap: wrap;
+}
+
+.pt-replace-dialog button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
 /* ============================================================
    Avatar shape preference (ST square/rounded avatar modes)
    ============================================================ */
