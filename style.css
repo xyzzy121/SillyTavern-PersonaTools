@@ -1252,6 +1252,12 @@
     cursor: pointer;
 }
 
+.pt-replace-preview summary .pt-replace-persona-text {
+    display: inline-flex;
+    max-width: calc(100% - 1.5em);
+    vertical-align: top;
+}
+
 .pt-replace-field-preview {
     margin-top: 10px;
 }

@@ -1191,7 +1191,10 @@
         function renderPreview(result) {
             status.textContent = `${result.matchCount} matches; ${result.personaCount} personas and ${result.fieldCount} fields would change.`;
             for (const change of result.changes) {
-                const details = el('details', {}, el('summary', { text: `${change.name} (${change.id})` }));
+                const text = el('span', { cls: 'pt-replace-persona-text' },
+                    el('span', { text: change.name }),
+                    el('small', { text: [getPersonaTitle(change.id), change.id].filter(Boolean).join(' · ') }));
+                const details = el('details', {}, el('summary', {}, text));
                 for (const field of change.fields) {
                     details.append(el('div', { cls: 'pt-replace-field-preview', attrs: { 'data-field': field.field } },
                         el('strong', { text: `${replacementFields[field.field]} — ${field.matches} matches` }),
